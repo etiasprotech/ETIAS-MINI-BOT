@@ -9,7 +9,7 @@ module.exports = {
     if (!isOwner) return m.reply("Owner only!");
     
     try {
-      m.reply("🔄 *Updating ETIAS-AI...*");
+      m.reply("🔄 *Updating ETIAS-MINI-BOT...*");
       
       execSync('git pull origin main', { stdio: 'inherit' });
       execSync('npm install', { stdio: 'inherit' });
