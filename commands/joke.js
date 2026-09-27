@@ -64,7 +64,7 @@ module.exports.execute = async (sock, msg) => {
 > *POWERED BY ETIAS-TECH*
 `;
 
-  const footer = "ETIAS-AI • POWERED BY ETIAS-TECH";
+  const footer = "*ETIAS-AI • POWERED BY ETIAS-TECH*";
   const buttons = [
     { buttonId: '.joke', buttonText: { displayText: '😂 NEXT JOKE' }, type: 1 },
     { buttonId: '.menu', buttonText: { displayText: '📜 MENU' }, type: 1 }

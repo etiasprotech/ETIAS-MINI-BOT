@@ -16,7 +16,7 @@ module.exports.execute = async (sock, msg, args) => {
 
   if (!query) {
     return await sock.sendMessage(chatId, {
-      text: `📄 *Usage:*.ytmp4 <name or link>\nExample:.ytmp4 alan walker faded\nOr:.ytmp4 https://youtu.be/wdJrTQJh1ZQ\n\n> POWERED BY ETIAS-TECH`
+      text: `📄 *Usage:*.ytmp4 <name or link>\nExample:.ytmp4 alan walker faded\nOr:.ytmp4 https://youtu.be/wdJrTQJh1ZQ\n\n> *POWERED BY ETIAS-TECH*`
     }, { quoted: msg });
   }
 
@@ -72,7 +72,7 @@ module.exports.execute = async (sock, msg, args) => {
       document: { url: videoUrl },
       mimetype: 'video/mp4',
       fileName: `${title.slice(0, 50)}.mp4`,
-      caption: `*${title}*\n\n> POWERED BY ETIAS-TECH`
+      caption: `*${title}*\n\n> *POWERED BY ETIAS-TECH*`
     }, { quoted: msg });
 
     // Info card with bot image + footer + buttons
@@ -90,7 +90,7 @@ module.exports.execute = async (sock, msg, args) => {
 
 > *POWERED BY ETIAS-TECH*
 `;
-    const footer = "ETIAS-AI • POWERED BY ETIAS-TECH";
+    const footer = "*ETIAS-MINI-BOT • POWERED BY ETIAS-TECH*";
     const buttons = [
       { buttonId: `.video ${query}`, buttonText: { displayText: '🎬 AS VIDEO' }, type: 1 },
       { buttonId: `.play ${query}`, buttonText: { displayText: '🎧 GET AUDIO' }, type: 1 }
@@ -116,6 +116,6 @@ module.exports.execute = async (sock, msg, args) => {
 
   } catch (e) {
     console.log('[YTMP4 ERROR]', e.message);
-    await sock.sendMessage(chatId, { text: `❌ Error: ${e.message}\n> POWERED BY ETIAS-TECH` }, { quoted: msg });
+    await sock.sendMessage(chatId, { text: `❌ Error: ${e.message}\n> *POWERED BY ETIAS-TECH*` }, { quoted: msg });
   }
 };

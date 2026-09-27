@@ -15,7 +15,7 @@ module.exports.execute = async (sock, msg, args) => {
 
   if (!appName) {
     return await sock.sendMessage(chatId, {
-      text: `📦 *Usage:*.apk <app name>\nExample:.apk Whatsapp\n.apk Facebook Lite\n\n> POWERED BY ETIAS-TECH`
+      text: `📦 *Usage:*.apk <app name>\nExample:.apk Whatsapp\n.apk Facebook Lite\n\n> *POWERED BY ETIAS-TECH*`
     }, { quoted: msg });
   }
 
@@ -55,7 +55,7 @@ module.exports.execute = async (sock, msg, args) => {
     }
 
     if (!apkUrl) {
-      return await sock.sendMessage(chatId, { text: `❌ APK not found for: *${appName}*\n\n> POWERED BY ETIAS-TECH` }, { quoted: msg });
+      return await sock.sendMessage(chatId, { text: `❌ APK not found for: *${appName}*\n\n> *POWERED BY ETIAS-TECH*` }, { quoted: msg });
     }
 
     await sock.sendMessage(chatId, { text: `⬇️ _Found *${appTitle}* (${appSize}) - Uploading as document..._` }, { quoted: msg });
@@ -65,7 +65,7 @@ module.exports.execute = async (sock, msg, args) => {
       document: { url: apkUrl },
       mimetype: 'application/vnd.android.package-archive',
       fileName: `${appTitle}.apk`,
-      caption: `*${appTitle}*\n📦 Size: ${appSize}\n🔖 Version: ${appVersion}\n\n> POWERED BY ETIAS-TECH`
+      caption: `*${appTitle}*\n📦 Size: ${appSize}\n🔖 Version: ${appVersion}\n\n> *POWERED BY ETIAS-TECH*`
     }, { quoted: msg });
 
     // Info card with bot image + footer
@@ -82,7 +82,7 @@ module.exports.execute = async (sock, msg, args) => {
 
 > *POWERED BY ETIAS-TECH*
 `;
-    const footer = "ETIAS-AI • POWERED BY ETIAS-TECH";
+    const footer = "*ETIAS-MINI-BOT • POWERED BY ETIAS-TECH*";
     const buttons = [
       { buttonId: `.apk ${appName}`, buttonText: { displayText: '🔄 RE-DOWNLOAD' }, type: 1 },
       { buttonId: '.menu', buttonText: { displayText: '📜 MENU' }, type: 1 }
@@ -108,6 +108,6 @@ module.exports.execute = async (sock, msg, args) => {
 
   } catch (e) {
     console.log('[APK ERROR]', e.message, e.response?.data);
-    await sock.sendMessage(chatId, { text: `❌ Error downloading APK: ${e.message}\n> POWERED BY ETIAS-TECH` }, { quoted: msg });
+    await sock.sendMessage(chatId, { text: `❌ Error downloading APK: ${e.message}\n> *POWERED BY ETIAS-TECH*` }, { quoted: msg });
   }
 };

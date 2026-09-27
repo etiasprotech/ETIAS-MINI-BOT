@@ -20,10 +20,10 @@ module.exports.execute = async (sock, msg, args) => {
     const isBotAdmin = groupMeta.participants.find(p => p.id === botId)?.admin;
 
     if (!isSenderAdmin) {
-      return await sock.sendMessage(chatId, { text: "❌ *Admins only.*\n\n> POWERED BY ETIAS-TECH" }, { quoted: msg });
+      return await sock.sendMessage(chatId, { text: "❌ *Admins only.*\n\n> *POWERED BY ETIAS-TECH*" }, { quoted: msg });
     }
     if (!isBotAdmin) {
-      return await sock.sendMessage(chatId, { text: "❌ *Bot must be admin to promote.*\n\n> POWERED BY ETIAS-TECH" }, { quoted: msg });
+      return await sock.sendMessage(chatId, { text: "❌ *Bot must be admin to promote.*\n\n> *POWERED BY ETIAS-TECH*" }, { quoted: msg });
     }
 
     let target;
@@ -43,7 +43,7 @@ module.exports.execute = async (sock, msg, args) => {
 
     if (!target) {
       return await sock.sendMessage(chatId, {
-        text: `╭━━━〔 *${BOT_NAME} PROMOTE* 〕━━━┈⊷\n┃\n┃ ❌ Usage:.promote @user\n┃ Or reply to user with.promote\n┃\n╰━━━━━━━━━━━━━━┈⊷\n\n> POWERED BY ETIAS-TECH`
+        text: `╭━━━〔 *${BOT_NAME} PROMOTE* 〕━━━┈⊷\n┃\n┃ ❌ Usage:.promote @user\n┃ Or reply to user with.promote\n┃\n╰━━━━━━━━━━━━━━┈⊷\n\n> *POWERED BY ETIAS-TECH*`
       }, { quoted: msg });
     }
 
@@ -69,7 +69,7 @@ module.exports.execute = async (sock, msg, args) => {
 
 > *POWERED BY ETIAS-TECH*
 `;
-    const footer = "ETIAS-AI • POWERED BY ETIAS-TECH";
+    const footer = "*ETIAS-MINI-BOT • POWERED BY ETIAS-TECH*";
     const buttons = [
       { buttonId: `.demote @${target.split('@')[0]}`, buttonText: { displayText: '⬇️ DEMOTE' }, type: 1 },
       { buttonId: '.tagall', buttonText: { displayText: '👥 TAGALL' }, type: 1 }
@@ -96,6 +96,6 @@ module.exports.execute = async (sock, msg, args) => {
 
   } catch (e) {
     console.log('[PROMOTE ERROR]', e.message);
-    await sock.sendMessage(chatId, { text: `❌ Failed to promote: ${e.message}\n\n> POWERED BY ETIAS-TECH` }, { quoted: msg });
+    await sock.sendMessage(chatId, { text: `❌ Failed to promote: ${e.message}\n\n> *POWERED BY ETIAS-TECH*` }, { quoted: msg });
   }
 };

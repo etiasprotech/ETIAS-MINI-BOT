@@ -30,7 +30,7 @@ module.exports.execute = async (sock, msg, args) => {
   if (sub === "on" || sub === "enable") {
     db[chatId] = true;
     saveDB(db);
-    return await sock.sendMessage(chatId, { text: `✅ *Antiviewonce enabled*\n\nI will recover view once messages.\n\n> POWERED BY ETIAS-TECH` }, { quoted: msg });
+    return await sock.sendMessage(chatId, { text: `✅ *Antiviewonce enabled*\n\nI will recover view once messages.\n\n> *POWERED BY ETIAS-TECH*` }, { quoted: msg });
   }
 
   if (sub === "off" || sub === "disable") {
@@ -61,7 +61,7 @@ module.exports.execute = async (sock, msg, args) => {
 
 > *POWERED BY ETIAS-TECH*
 `;
-  const footer = "ETIAS-AI • POWERED BY ETIAS-TECH";
+  const footer = "*ETIAS-MINI-BOT • POWERED BY ETIAS-TECH*";
   const buttons = [
     { buttonId: '.antiviewonce on', buttonText: { displayText: '✅ ENABLE' }, type: 1 },
     { buttonId: '.antiviewonce off', buttonText: { displayText: '❌ DISABLE' }, type: 1 }

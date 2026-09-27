@@ -1,11 +1,10 @@
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 
 const BOT_IMAGE_PATH = path.join(__dirname, '..', 'media/bot_image.png');
 const MENU_IMAGE_PATH = path.join(__dirname, '..', 'media/menu.jpg');
-const BOT_NAME = "ETIAS-MINI-BOT";
-const VERSION = "V2.0 ULTRA";
+const BOT_NAME = "*ETIAS-MINI-BOT*";
+const VERSION = "*V2.0 ULTRA*";
 const FOOTER = "*POWERED BY ETIAS-TECH*";
 
 module.exports.name = "menu";
@@ -14,7 +13,6 @@ module.exports.execute = async (sock, msg, args) => {
   const chatId = msg.key.remoteJid;
   const sender = msg.key.participant || msg.key.remoteJid;
 
-  // 🚀 React
   try {
     await sock.sendMessage(chatId, {
       react: { text: "🚀", key: msg.key }
@@ -29,7 +27,24 @@ module.exports.execute = async (sock, msg, args) => {
     return `${h}h ${m}m ${s}s`;
   };
 
-  const totalCommands = 38;
+  // ===== GET CURRENT MODE =====
+  let currentMode = global.botMode || 'public';
+  try {
+    const modePath = path.join(__dirname, '..', 'data/mode.json');
+    if(fs.existsSync(modePath)){
+      const d = JSON.parse(fs.readFileSync(modePath,'utf-8'));
+      currentMode = d.mode || currentMode;
+    }
+  } catch {}
+
+  const modeEmoji = {
+    public: '🌍',
+    private: '🔒',
+    groups: '👥',
+    inbox: '💬'
+  }[currentMode] || '🌍';
+
+  const totalCommands = 39;
 
   const menuText = `
 ╭━━━〔 *${BOT_NAME} ${VERSION}* 〕━━━┈⊷
@@ -38,7 +53,7 @@ module.exports.execute = async (sock, msg, args) => {
 ┃ 🤖 *Bot:* ${BOT_NAME}
 ┃ ⏰ *Uptime:* ${uptime()}
 ┃ 📊 *Commands:* ${totalCommands}
-┃ 🌐 *Mode:* Public
+┃ ${modeEmoji} *Mode:* ${currentMode.toUpperCase()}
 ┃ 🚀 *Prefix:* .
 ┃
 ╰━━━━━━━━━━━━━━━━━━━━━┈⊷
@@ -68,6 +83,15 @@ module.exports.execute = async (sock, msg, args) => {
 ┃ • .alive - Bot alive check
 ╰━━━━━━━━━━━━━━━━━━━━━┈⊷
 
+╭━━━〔 *🔐 BOT SETTINGS* 〕━━━┈⊷
+┃ • .mode - Check current mode
+┃ • .mode public - All can use
+┃ • .mode private - Owner only 🔒
+┃ • .mode groups - Groups only 👥
+┃ • .mode inbox - Inbox only 💬
+┃ • .session - Get session ID
+╰━━━━━━━━━━━━━━━━━━━━━┈⊷
+
 ╭━━━〔 *🤖 AI & FUN* 〕━━━┈⊷
 ┃ • .ai / .etias - ETIAS AI Chat
 ┃ • .joke - Random joke
@@ -92,6 +116,7 @@ module.exports.execute = async (sock, msg, args) => {
 ┃ • Auto ViewOnce Recovery
 ┃ • Auto AntiLink + AntiDelete
 ┃ • HD Profile Picture Stealer
+┃ • Mode: ${modeEmoji} ${currentMode.toUpperCase()}
 ╰━━━━━━━━━━━━━━━━━━━━━┈⊷
 
 > ${FOOTER}
@@ -99,12 +124,11 @@ module.exports.execute = async (sock, msg, args) => {
 `;
 
   const buttons = [
+    { buttonId: `.mode ${currentMode}`, buttonText: { displayText: `${modeEmoji} MODE: ${currentMode.toUpperCase()}` }, type: 1 },
     { buttonId: '.ping', buttonText: { displayText: '⚡ SPEED' }, type: 1 },
-    { buttonId: '.owner', buttonText: { displayText: '👑 OWNER' }, type: 1 },
-    { buttonId: '.alive', buttonText: { displayText: '🤖 ALIVE' }, type: 1 }
+    { buttonId: '.owner', buttonText: { displayText: '👑 OWNER' }, type: 1 }
   ];
 
-  // Try to send with menu.jpg or bot.png
   let imagePath = null;
   if (fs.existsSync(MENU_IMAGE_PATH)) imagePath = MENU_IMAGE_PATH;
   else if (fs.existsSync(BOT_IMAGE_PATH)) imagePath = BOT_IMAGE_PATH;
@@ -119,10 +143,10 @@ module.exports.execute = async (sock, msg, args) => {
         headerType: 4,
         contextInfo: {
           externalAdReply: {
-            title: `${BOT_NAME} ${VERSION}`,
-            body: `Total ${totalCommands} Commands | ${FOOTER}`,
+            title: `${BOT_NAME} ${VERSION} [${currentMode.toUpperCase()}]`,
+            body: `Total ${totalCommands} Commands | Mode: ${currentMode} | ${FOOTER}`,
             thumbnailUrl: "",
-            sourceUrl: "https://api-etias-ai.onrender.com",
+            sourceUrl: "https://etias-mini-bot-pair.onrender.com/",
             mediaType: 1,
             renderLargerThumbnail: true
           }
@@ -137,7 +161,6 @@ module.exports.execute = async (sock, msg, args) => {
       }, { quoted: msg });
     }
   } catch (e) {
-    // Fallback without buttons if Baileys version doesn't support
     if (imagePath) {
       await sock.sendMessage(chatId, {
         image: fs.readFileSync(imagePath),

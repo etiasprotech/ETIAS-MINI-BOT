@@ -17,7 +17,7 @@ module.exports.execute = async (sock, msg, args) => {
     const isSenderAdmin = groupMeta.participants.find(p => p.id === sender)?.admin;
 
     if (!isSenderAdmin) {
-      return await sock.sendMessage(chatId, { text: "❌ *Admins only - tagall.*\n\n> POWERED BY ETIAS-TECH" }, { quoted: msg });
+      return await sock.sendMessage(chatId, { text: "❌ *Admins only - tagall.*\n\n> *POWERED BY ETIAS-TECH*" }, { quoted: msg });
     }
 
     const participants = groupMeta.participants.map(p => p.id);
@@ -49,7 +49,7 @@ module.exports.execute = async (sock, msg, args) => {
 > *POWERED BY ETIAS-TECH*
 `;
 
-    const footer = "ETIAS-AI • POWERED BY ETIAS-TECH";
+    const footer = "*ETIAS-MINI-BOT • POWERED BY ETIAS-TECH*";
     const buttons = [
       { buttonId: '.hidetag ' + (customMsg || ''), buttonText: { displayText: '🔊 HIDETAG' }, type: 1 },
       { buttonId: '.mute', buttonText: { displayText: '🔒 MUTE' }, type: 1 }

@@ -32,18 +32,18 @@ module.exports.execute = async (sock, msg, args) => {
   if (sub === "on" || sub === "enable") {
     db[chatId] = true;
     saveDB(db);
-    return await sock.sendMessage(chatId, { text: `✅ *Antidelete enabled* for this ${isGroup? "group" : "chat"}\n\nI will recover deleted messages.\n\n> POWERED BY ETIAS-TECH` }, { quoted: msg });
+    return await sock.sendMessage(chatId, { text: `✅ *Antidelete enabled* for this ${isGroup? "group" : "chat"}\n\nI will recover deleted messages.\n\n> *POWERED BY ETIAS-TECH*` }, { quoted: msg });
   }
 
   if (sub === "off" || sub === "disable") {
     db[chatId] = false;
     saveDB(db);
-    return await sock.sendMessage(chatId, { text: `❌ *Antidelete disabled*\n\n> POWERED BY ETIAS-TECH` }, { quoted: msg });
+    return await sock.sendMessage(chatId, { text: `❌ *Antidelete disabled*\n\n> *POWERED BY ETIAS-TECH*` }, { quoted: msg });
   }
 
   if (sub === "status") {
     const enabled = db[chatId];
-    return await sock.sendMessage(chatId, { text: `╭━━━〔 *ANTIDELETE STATUS* 〕━━━\n┃ Status: ${enabled? "✅ ON" : "❌ OFF"}\n╰━━━━━━━━━━━━━━\n\n> POWERED BY ETIAS-TECH` }, { quoted: msg });
+    return await sock.sendMessage(chatId, { text: `╭━━━〔 *ANTIDELETE STATUS* 〕━━━\n┃ Status: ${enabled? "✅ ON" : "❌ OFF"}\n╰━━━━━━━━━━━━━━\n\n> *POWERED BY ETIAS-TECH*` }, { quoted: msg });
   }
 
   const helpText = `
@@ -67,7 +67,7 @@ module.exports.execute = async (sock, msg, args) => {
 
 > *POWERED BY ETIAS-TECH*
 `;
-  const footer = "ETIAS-AI • POWERED BY ETIAS-TECH";
+  const footer = "*ETIAS-MINI-BOT • POWERED BY ETIAS-TECH*";
   const buttons = [
     { buttonId: '.antidelete on', buttonText: { displayText: '✅ ENABLE' }, type: 1 },
     { buttonId: '.antidelete off', buttonText: { displayText: '❌ DISABLE' }, type: 1 }

@@ -24,13 +24,13 @@ module.exports.execute = async (sock, msg, args) => {
 
     if (!isSenderAdmin &&!isSenderAdmin2) {
       return await sock.sendMessage(chatId, {
-        text: "❌ *Admins only.*\n\n> POWERED BY ETIAS-TECH"
+        text: "❌ *Admins only.*\n\n> *POWERED BY ETIAS-TECH*"
       }, { quoted: msg });
     }
 
     if (!isBotAdmin) {
       return await sock.sendMessage(chatId, {
-        text: "❌ *Bot must be admin to kick.*\n\n> POWERED BY ETIAS-TECH"
+        text: "❌ *Bot must be admin to kick.*\n\n> *POWERED BY ETIAS-TECH*"
       }, { quoted: msg });
     }
 
@@ -53,7 +53,7 @@ module.exports.execute = async (sock, msg, args) => {
 
     if (!target) {
       return await sock.sendMessage(chatId, {
-        text: `╭━━━〔 *${BOT_NAME} KICK* 〕━━━┈⊷\n┃\n┃ ❌ Usage:.kick @user\n┃ Or reply to user with.kick\n┃\n╰━━━━━━━━━━━━━━┈⊷\n\n> POWERED BY ETIAS-TECH`
+        text: `╭━━━〔 *${BOT_NAME} KICK* 〕━━━┈⊷\n┃\n┃ ❌ Usage:.kick @user\n┃ Or reply to user with.kick\n┃\n╰━━━━━━━━━━━━━━┈⊷\n\n> *POWERED BY ETIAS-TECH*`
       }, { quoted: msg });
     }
 
@@ -66,7 +66,7 @@ module.exports.execute = async (sock, msg, args) => {
     const isTargetAdmin = groupMeta.participants.find(p => p.id === target)?.admin;
     if (isTargetAdmin) {
       return await sock.sendMessage(chatId, {
-        text: `❌ Can't kick another admin.\nDemote first.\n\n> POWERED BY ETIAS-TECH`
+        text: `❌ Can't kick another admin.\nDemote first.\n\n> *POWERED BY ETIAS-TECH*`
       }, { quoted: msg });
     }
 
@@ -86,7 +86,7 @@ module.exports.execute = async (sock, msg, args) => {
 
 > *POWERED BY ETIAS-TECH*
 `;
-    const footer = "*ETIAS-AI • POWERED BY ETIAS-TECH*";
+    const footer = "*ETIAS-MINI-BOT • POWERED BY ETIAS-TECH*";
     const buttons = [
       { buttonId: '.tagall', buttonText: { displayText: '👥 TAGALL' }, type: 1 },
       { buttonId: '.menu', buttonText: { displayText: '📜 MENU' }, type: 1 }
@@ -114,7 +114,7 @@ module.exports.execute = async (sock, msg, args) => {
   } catch (e) {
     console.log('[KICK ERROR]', e.message);
     await sock.sendMessage(chatId, {
-      text: `❌ Failed to kick: ${e.message}\n\n> POWERED BY ETIAS-TECH`
+      text: `❌ Failed to kick: ${e.message}\n\n> *POWERED BY ETIAS-TECH*`
     }, { quoted: msg });
   }
 };

@@ -31,7 +31,7 @@ module.exports.execute = async (sock, msg, args) => {
     db[chatId].enabled = true;
     db[chatId].message = db[chatId].message || "Goodbye @user 👋\nWe will miss you from @group\nRemaining: @count members";
     saveDB(db);
-    return await sock.sendMessage(chatId, { text: `✅ *Goodbye enabled*\n\nDefault: ${db[chatId].message}\n\n> POWERED BY ETIAS-TECH` }, { quoted: msg });
+    return await sock.sendMessage(chatId, { text: `✅ *Goodbye enabled*\n\nDefault: ${db[chatId].message}\n\n> *POWERED BY ETIAS-TECH*` }, { quoted: msg });
   }
 
   if (sub === "off" || sub === "disable" || sub === "0") {
@@ -78,7 +78,7 @@ module.exports.execute = async (sock, msg, args) => {
 ╰━━━━━━━━━━━━━━━━━━┈⊷
 > *POWERED BY ETIAS-TECH*
 `;
-  const footer = "ETIAS-AI • POWERED BY ETIAS-TECH";
+  const footer = "*ETIAS-MINI-BOT • POWERED BY ETIAS-TECH*";
   const buttons = [
     { buttonId: '.goodbye on', buttonText: { displayText: '✅ ENABLE' }, type: 1 },
     { buttonId: '.goodbye off', buttonText: { displayText: '❌ DISABLE' }, type: 1 }

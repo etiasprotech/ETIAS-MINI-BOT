@@ -20,15 +20,15 @@ module.exports.execute = async (sock, msg, args) => {
     const isBotAdmin = groupMeta.participants.find(p => p.id === botId)?.admin;
 
     if (!isSenderAdmin) {
-      return await sock.sendMessage(chatId, { text: "❌ *Admins only.*\n\n> POWERED BY ETIAS-TECH" }, { quoted: msg });
+      return await sock.sendMessage(chatId, { text: "❌ *Admins only.*\n\n> *POWERED BY ETIAS-TECH*" }, { quoted: msg });
     }
     if (!isBotAdmin) {
-      return await sock.sendMessage(chatId, { text: "❌ *Bot must be admin to add.*\n\n> POWERED BY ETIAS-TECH" }, { quoted: msg });
+      return await sock.sendMessage(chatId, { text: "❌ *Bot must be admin to add.*\n\n> *POWERED BY ETIAS-TECH*" }, { quoted: msg });
     }
 
     if (!args[0]) {
       return await sock.sendMessage(chatId, {
-        text: `╭━━━〔 *${BOT_NAME} ADD* 〕━━━┈⊷\n┃\n┃ ❌ Usage:.add 263xxxxxxxx\n┃ Example:.add 263785123456\n┃\n┃ Or multiple:.add 2637xxxx,2637xxxx\n┃\n╰━━━━━━━━━━━━━━┈⊷\n\n> POWERED BY ETIAS-TECH`
+        text: `╭━━━〔 *${BOT_NAME} ADD* 〕━━━┈⊷\n┃\n┃ ❌ Usage:.add 263xxxxxxxx\n┃ Example:.add 263785123456\n┃\n┃ Or multiple:.add 2637xxxx,2637xxxx\n┃\n╰━━━━━━━━━━━━━━┈⊷\n\n> *POWERED BY ETIAS-TECH*`
       }, { quoted: msg });
     }
 
@@ -81,7 +81,7 @@ ${failed.length? `┃\n┃ ⚠️ Failed maybe privacy/blocked or needs invite l
 
 > *POWERED BY ETIAS-TECH*
 `;
-    const footer = "ETIAS-AI • POWERED BY ETIAS-TECH";
+    const footer = "*ETIAS-MINI-BOT • POWERED BY ETIAS-TECH*";
     const buttons = [
       { buttonId: '.tagall', buttonText: { displayText: '👥 TAGALL' }, type: 1 },
       { buttonId: '.link', buttonText: { displayText: '🔗 GROUP LINK' }, type: 1 }
@@ -114,7 +114,7 @@ ${failed.length? `┃\n┃ ⚠️ Failed maybe privacy/blocked or needs invite l
         const inviteCode = await sock.groupInviteCode(chatId);
         for (let f of failed) {
           await sock.sendMessage(f, {
-            text: `🔗 You were invited to join *${groupMeta.subject}* by @${sender.split('@')[0]}\n\nhttps://chat.whatsapp.com/${inviteCode}\n\n> POWERED BY ETIAS-TECH`,
+            text: `🔗 You were invited to join *${groupMeta.subject}* by @${sender.split('@')[0]}\n\nhttps://chat.whatsapp.com/${inviteCode}\n\n> *POWERED BY ETIAS-TECH*`,
             mentions: [sender]
           });
         }
@@ -125,7 +125,7 @@ ${failed.length? `┃\n┃ ⚠️ Failed maybe privacy/blocked or needs invite l
   } catch (e) {
     console.log('[ADD ERROR]', e.message);
     await sock.sendMessage(chatId, {
-      text: `❌ Failed to add: ${e.message}\n\n> POWERED BY ETIAS-TECH`
+      text: `❌ Failed to add: ${e.message}\n\n> *POWERED BY ETIAS-TECH*`
     }, { quoted: msg });
   }
 };

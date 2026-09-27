@@ -31,14 +31,14 @@ module.exports.execute = async (sock, msg, args) => {
     db[chatId].enabled = true;
     db[chatId].message = db[chatId].message || "Welcome @user to @group 🎉\n\n@desc\n\nMembers: @count";
     saveDB(db);
-    return await sock.sendMessage(chatId, { text: `✅ *Welcome enabled*\n\nTags: @user @group @count @desc @pp\n\n> POWERED BY ETIAS-TECH` }, { quoted: msg });
+    return await sock.sendMessage(chatId, { text: `✅ *Welcome enabled*\n\nTags: @user @group @count @desc @pp\n\n> *POWERED BY ETIAS-TECH*` }, { quoted: msg });
   }
 
   if (sub === "off" || sub === "disable" || sub === "0") {
     db[chatId] = db[chatId] || {};
     db[chatId].enabled = false;
     saveDB(db);
-    return await sock.sendMessage(chatId, { text: "❌ *Welcome disabled*\n\n> POWERED BY ETIAS-TECH" }, { quoted: msg });
+    return await sock.sendMessage(chatId, { text: "❌ *Welcome disabled*\n\n> *POWERED BY ETIAS-TECH*" }, { quoted: msg });
   }
 
   if (sub === "set" || sub === "message") {
@@ -85,7 +85,7 @@ module.exports.execute = async (sock, msg, args) => {
 ╰━━━━━━━━━━━━━━━━━━┈⊷
 > *POWERED BY ETIAS-TECH*
 `;
-  const footer = "*ETIAS-AI • POWERED BY ETIAS-TECH*";
+  const footer = "*ETIAS-MINI-BOT • POWERED BY ETIAS-TECH*";
   const buttons = [
     { buttonId: '.welcome on', buttonText: { displayText: '✅ ENABLE' }, type: 1 },
     { buttonId: '.welcome off', buttonText: { displayText: '❌ DISABLE' }, type: 1 }

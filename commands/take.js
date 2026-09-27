@@ -63,7 +63,7 @@ module.exports.execute = async (sock, msg, args) => {
 
   } catch (e) {
     await sock.sendMessage(chatId, {
-      text: `❌ Can't get DP for @${targetJid.split('@')[0]}\n\nReason: No DP / Privacy settings / Invalid number\n\n> POWERED BY ETIAS-TECH`,
+      text: `❌ Can't get DP for @${targetJid.split('@')[0]}\n\nReason: No DP / Privacy settings / Invalid number\n\n> *POWERED BY ETIAS-TECH*`,
       mentions: [targetJid]
     }, { quoted: msg });
   }

@@ -11,7 +11,7 @@ module.exports.execute = async (sock, msg, args) => {
 
   if (!quotedMsg) {
     return await sock.sendMessage(chatId, {
-      text: "❌ *Reply to a view once message*\n\nUsage: reply to view once image/video then type\n`.vv`\n\n> POWERED BY ETIAS-TECH"
+      text: "❌ *Reply to a view once message*\n\nUsage: reply to view once image/video then type\n`.vv`\n\n> *POWERED BY ETIAS-TECH*"
     }, { quoted: msg });
   }
 
@@ -58,7 +58,7 @@ module.exports.execute = async (sock, msg, args) => {
 
     if (!mediaMsg) {
       return await sock.sendMessage(chatId, {
-        text: "❌ That is not a view once message.\n\nMake sure you REPLIED to a view once photo/video.\n\n> POWERED BY ETIAS-TECH"
+        text: "❌ That is not a view once message.\n\nMake sure you REPLIED to a view once photo/video.\n\n> *POWERED BY ETIAS-TECH*"
       }, { quoted: msg });
     }
 
@@ -100,7 +100,7 @@ module.exports.execute = async (sock, msg, args) => {
   } catch (e) {
     console.log("[VV ERROR]", e);
     await sock.sendMessage(chatId, {
-      text: `❌ Failed to open view once: ${e.message}\n\nTip: The view once may have expired or WhatsApp changed format.\n\n> POWERED BY ETIAS-TECH`
+      text: `❌ Failed to open view once: ${e.message}\n\nTip: The view once may have expired or WhatsApp changed format.\n\n> *POWERED BY ETIAS-TECH*`
     }, { quoted: msg });
   }
 };

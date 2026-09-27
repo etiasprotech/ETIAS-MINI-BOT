@@ -17,7 +17,7 @@ module.exports.execute = async (sock, msg, args) => {
     const isSenderAdmin = groupMeta.participants.find(p => p.id === sender)?.admin;
 
     if (!isSenderAdmin) {
-      return await sock.sendMessage(chatId, { text: "❌ *Admins only - hidetag.*\n\n> POWERED BY ETIAS-TECH" }, { quoted: msg });
+      return await sock.sendMessage(chatId, { text: "❌ *Admins only - hidetag.*\n\n> *POWERED BY ETIAS-TECH*" }, { quoted: msg });
     }
 
     const participants = groupMeta.participants.map(p => p.id);
@@ -33,7 +33,7 @@ module.exports.execute = async (sock, msg, args) => {
 
     if (!text) {
       return await sock.sendMessage(chatId, {
-        text: `╭━━━〔 *${BOT_NAME} HIDETAG* 〕━━━┈⊷\n┃\n┃ ❌ Usage:.hidetag <message>\n┃ Or reply to message with.hidetag\n┃ Example:.hidetag Hello everyone\n┃\n╰━━━━━━━━━━━━━━┈⊷\n\n> POWERED BY ETIAS-TECH`
+        text: `╭━━━〔 *${BOT_NAME} HIDETAG* 〕━━━┈⊷\n┃\n┃ ❌ Usage:.hidetag <message>\n┃ Or reply to message with.hidetag\n┃ Example:.hidetag Hello everyone\n┃\n╰━━━━━━━━━━━━━━┈⊷\n\n> *POWERED BY ETIAS-TECH*`
       }, { quoted: msg });
     }
 
@@ -74,7 +74,7 @@ module.exports.execute = async (sock, msg, args) => {
 ┃ 👤 *By:* @${sender.split('@')[0]}
 ┃
 ╰━━━━━━━━━━━━━━━━━━┈⊷
-> POWERED BY ETIAS-TECH
+> *POWERED BY ETIAS-TECH*
 `;
     // Uncomment below if you want confirmation card:
     // if (fs.existsSync(BOT_IMAGE_PATH)) {
@@ -87,6 +87,6 @@ module.exports.execute = async (sock, msg, args) => {
 
   } catch (e) {
     console.log('[HIDETAG ERROR]', e.message);
-    await sock.sendMessage(chatId, { text: `❌ Hidetag failed: ${e.message}\n\n> POWERED BY ETIAS-TECH` }, { quoted: msg });
+    await sock.sendMessage(chatId, { text: `❌ Hidetag failed: ${e.message}\n\n> *POWERED BY ETIAS-TECH*` }, { quoted: msg });
   }
 };

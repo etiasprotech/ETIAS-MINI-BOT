@@ -36,24 +36,24 @@ module.exports.execute = async (sock, msg, args) => {
     const action = args[1]?.toLowerCase() || "delete"; // delete, kick, warn
     db[chatId] = { enabled: true, action: action, warnCount: {} };
     saveDB(db);
-    return await sock.sendMessage(chatId, { text: `✅ *Antilink enabled*\n\nAction: ${action.toUpperCase()}\n• delete = delete link\n• kick = delete + kick\n• warn = delete + warn (3 warns = kick)\n\nExample:.antilink on kick\n\n> POWERED BY ETIAS-TECH` }, { quoted: msg });
+    return await sock.sendMessage(chatId, { text: `✅ *Antilink enabled*\n\nAction: ${action.toUpperCase()}\n• delete = delete link\n• kick = delete + kick\n• warn = delete + warn (3 warns = kick)\n\nExample:.antilink on kick\n\n> *POWERED BY ETIAS-TECH*` }, { quoted: msg });
   }
 
   if (sub === "off" || sub === "disable") {
     db[chatId] = { enabled: false, action: "delete", warnCount: {} };
     saveDB(db);
-    return await sock.sendMessage(chatId, { text: "❌ *Antilink disabled*\n\n> POWERED BY ETIAS-TECH" }, { quoted: msg });
+    return await sock.sendMessage(chatId, { text: "❌ *Antilink disabled*\n\n> *POWERED BY ETIAS-TECH*" }, { quoted: msg });
   }
 
   if (sub === "status") {
     const conf = db[chatId];
-    return await sock.sendMessage(chatId, { text: `╭━━━〔 *ANTILINK STATUS* 〕━━━\n┃ Status: ${conf?.enabled? "✅ ON" : "❌ OFF"}\n┃ Action: ${conf?.action || "delete"}\n╰━━━━━━━━━━━━━━\n\n> POWERED BY ETIAS-TECH` }, { quoted: msg });
+    return await sock.sendMessage(chatId, { text: `╭━━━〔 *ANTILINK STATUS* 〕━━━\n┃ Status: ${conf?.enabled? "✅ ON" : "❌ OFF"}\n┃ Action: ${conf?.action || "delete"}\n╰━━━━━━━━━━━━━━\n\n> *POWERED BY ETIAS-TECH*` }, { quoted: msg });
   }
 
   if (sub === "kick" || sub === "delete" || sub === "warn") {
     db[chatId] = { enabled: true, action: sub, warnCount: db[chatId]?.warnCount || {} };
     saveDB(db);
-    return await sock.sendMessage(chatId, { text: `✅ Antilink set to *${sub.toUpperCase()}* mode\n\n> POWERED BY ETIAS-TECH` }, { quoted: msg });
+    return await sock.sendMessage(chatId, { text: `✅ Antilink set to *${sub.toUpperCase()}* mode\n\n> *POWERED BY ETIAS-TECH*` }, { quoted: msg });
   }
 
   const helpText = `
@@ -79,7 +79,7 @@ module.exports.execute = async (sock, msg, args) => {
 
 > *POWERED BY ETIAS-TECH*
 `;
-  const footer = "ETIAS-AI • POWERED BY ETIAS-TECH";
+  const footer = "*ETIAS-MINI-BOT • POWERED BY ETIAS-TECH*";
   const buttons = [
     { buttonId: '.antilink on kick', buttonText: { displayText: '🔨 KICK MODE' }, type: 1 },
     { buttonId: '.antilink off', buttonText: { displayText: '❌ DISABLE' }, type: 1 }

@@ -16,7 +16,7 @@ module.exports.execute = async (sock, msg, args) => {
 
   if (!url ||!url.includes('facebook.com')) {
     return await sock.sendMessage(chatId, {
-      text: `📘 *Usage:*.fb <facebook link>\nExample:.fb https://www.facebook.com/reel/402579285704851\n\n> POWERED BY ETIAS-TECH`
+      text: `📘 *Usage:*.fb <facebook link>\nExample:.fb https://www.facebook.com/reel/402579285704851\n\n> *POWERED BY ETIAS-TECH*`
     }, { quoted: msg });
   }
 
@@ -66,7 +66,7 @@ module.exports.execute = async (sock, msg, args) => {
       apiUsed = "v1";
     } catch (e2) {
       console.log('[FB V1 FAIL]', e2.message);
-      return await sock.sendMessage(chatId, { text: `❌ Both v2 and v1 failed.\n> POWERED BY ETIAS-TECH` }, { quoted: msg });
+      return await sock.sendMessage(chatId, { text: `❌ Both v2 and v1 failed.\n> *POWERED BY ETIAS-TECH*` }, { quoted: msg });
     }
   }
 
@@ -79,7 +79,7 @@ module.exports.execute = async (sock, msg, args) => {
     await sock.sendMessage(chatId, {
       video: { url: videoUrl },
       mimetype: 'video/mp4',
-      caption: `*${title}*\n\n✅ *Downloaded via FB ${apiUsed.toUpperCase()}*\n> POWERED BY ETIAS-TECH`,
+      caption: `*${title}*\n\n✅ *Downloaded via FB ${apiUsed.toUpperCase()}*\n> *POWERED BY ETIAS-TECH*`,
       fileName: `facebook_${Date.now()}.mp4`
     }, { quoted: msg });
 
@@ -96,7 +96,7 @@ module.exports.execute = async (sock, msg, args) => {
 
 > *POWERED BY ETIAS-TECH*
 `;
-    const footer = "ETIAS-AI • POWERED BY ETIAS-TECH";
+    const footer = "*ETIAS-MINI-BOT • POWERED BY ETIAS-TECH*";
     const buttons = [
       { buttonId: `.fb ${url}`, buttonText: { displayText: '🔄 RE-DOWNLOAD' }, type: 1 },
       { buttonId: '.menu', buttonText: { displayText: '📜 MENU' }, type: 1 }

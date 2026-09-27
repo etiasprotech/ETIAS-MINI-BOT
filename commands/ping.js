@@ -29,7 +29,7 @@ module.exports.execute = async (sock, msg, args) => {
   const ramTotal = (os.totalmem() / 1024 / 1024 / 1024).toFixed(2);
   const cpuModel = os.cpus()[0]?.model?.split('@')[0]?.trim() || "Unknown CPU";
 
-  const text = `╭━━━〔 *ETIAS-AI PING* 〕━━━┈⊷
+  const text = `╭━━━〔 *ETIAS-MINI-BOT PING* 〕━━━┈⊷
 ┃
 ┃ 🚀 *Speed:* ${latency} ms
 ┃ ⏱️ *Latency:* ${latency} ms
@@ -37,11 +37,11 @@ module.exports.execute = async (sock, msg, args) => {
 ┃ 🧠 *RAM:* ${ramUsed} MB / ${ramTotal} GB
 ┃ 💻 *CPU:* ${cpuModel}
 ┃ 📡 *Platform:* ${os.platform()}
-┃ 🤖 *Bot:* ETIAS-AI V2 ULTRA
+┃ 🤖 *Bot:* ETIAS-MINI-BOT V2 ULTRA
 ┃
 ╰━━━━━━━━━━━━━━━┈⊷
 
-> POWERED BY ETIAS-TECH`;
+> *POWERED BY ETIAS-TECH*`;
 
   try {
     await sock.sendMessage(chatId, {

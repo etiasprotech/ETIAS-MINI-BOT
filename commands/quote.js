@@ -79,7 +79,7 @@ module.exports.execute = async (sock, msg) => {
 > *POWERED BY ETIAS-TECH*
 `;
 
-  const footer = "ETIAS-AI • POWERED BY ETIAS-TECH";
+  const footer = "*ETIAS-MINI-BOT • POWERED BY ETIAS-TECH*";
   const buttons = [
     { buttonId: '.quote', buttonText: { displayText: '✨ NEXT QUOTE' }, type: 1 },
     { buttonId: '.menu', buttonText: { displayText: '📜 MENU' }, type: 1 }

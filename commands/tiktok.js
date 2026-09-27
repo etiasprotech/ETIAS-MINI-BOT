@@ -13,7 +13,7 @@ const APIS = [
 ];
 
 module.exports.name = "tiktok";
-module.exports.aliases = ["tt", "ttdl", "tikdl"];
+module.exports.aliases = ["ttdl", "tikdl"];
 module.exports.execute = async (sock, msg, args) => {
   const chatId = msg.key.remoteJid;
   const url = args[0];
@@ -85,7 +85,7 @@ module.exports.execute = async (sock, msg, args) => {
   }
 
   if (!videoUrl) {
-    return await sock.sendMessage(chatId, { text: `❌ All 4 TikTok APIs failed (v4,v3,v2,v1).\n> POWERED BY ETIAS-TECH` }, { quoted: msg });
+    return await sock.sendMessage(chatId, { text: `❌ All 4 TikTok APIs failed (v4,v3,v2,v1).\n> *POWERED BY ETIAS-TECH*` }, { quoted: msg });
   }
 
   try {
@@ -93,7 +93,7 @@ module.exports.execute = async (sock, msg, args) => {
     await sock.sendMessage(chatId, {
       video: { url: videoUrl },
       mimetype: 'video/mp4',
-      caption: `*${title}*\n👤 ${author}\n\n✅ *Downloaded via ${successApi.toUpperCase()}*\n> POWERED BY ETIAS-TECH`
+      caption: `*${title}*\n👤 ${author}\n\n✅ *Downloaded via ${successApi.toUpperCase()}*\n> *POWERED BY ETIAS-TECH*`
     }, { quoted: msg });
 
     // Info card
@@ -110,7 +110,7 @@ module.exports.execute = async (sock, msg, args) => {
 
 > *POWERED BY ETIAS-TECH*
 `;
-    const footer = "ETIAS-AI • POWERED BY ETIAS-TECH";
+    const footer = "*ETIAS-MINI-BOT • POWERED BY ETIAS-TECH*";
     const buttons = [
       { buttonId: `.tiktok ${url}`, buttonText: { displayText: '🔄 RE-DOWNLOAD' }, type: 1 },
       { buttonId: '.menu', buttonText: { displayText: '📜 MENU' }, type: 1 }

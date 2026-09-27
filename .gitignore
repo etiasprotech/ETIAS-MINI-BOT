@@ -1,6 +1,6 @@
 node_modules/
-auth/
 data/
-.env
-session/
+auth/
 *.log
+.env
+sent_*.lock

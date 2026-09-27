@@ -35,7 +35,7 @@ module.exports.execute = async (sock, msg, args) => {
 > *Base: ${BASE_URL}*
 > *POWERED BY ETIAS-TECH*
 `;
-    const footer = "*ETIAS-AI • POWERED BY ETIAS-TECH*";
+    const footer = "*ETIAS-MINI-BOT • POWERED BY ETIAS-TECH*";
     const buttons = [
       { buttonId: '.etias status', buttonText: { displayText: '📊 STATUS' }, type: 1 },
       { buttonId: '.etias hello', buttonText: { displayText: '💬 CHAT' }, type: 1 }
@@ -55,9 +55,9 @@ module.exports.execute = async (sock, msg, args) => {
         headers: { "x-api-key": API_KEY, "Authorization": `Bearer ${API_KEY}` },
         timeout: 10000
       });
-      return await sock.sendMessage(chatId, { text: `╭━━━〔 *API STATUS* 〕━━━\n┃ ✅ Online\n┃ URL: ${BASE_URL}\n┃ Response: ${JSON.stringify(res.data).slice(0,300)}\n╰━━━━━━━━━━━━\n\n> POWERED BY ETIAS-TECH` }, { quoted: msg });
+      return await sock.sendMessage(chatId, { text: `╭━━━〔 *API STATUS* 〕━━━\n┃ ✅ Online\n┃ URL: ${BASE_URL}\n┃ Response: ${JSON.stringify(res.data).slice(0,300)}\n╰━━━━━━━━━━━━\n\n> *POWERED BY ETIAS-TECH*` }, { quoted: msg });
     } catch (e) {
-      return await sock.sendMessage(chatId, { text: `❌ API Offline: ${e.message}\n\n> POWERED BY ETIAS-TECH` }, { quoted: msg });
+      return await sock.sendMessage(chatId, { text: `❌ API Offline: ${e.message}\n\n> *POWERED BY ETIAS-TECH*` }, { quoted: msg });
     }
   }
 
@@ -67,7 +67,7 @@ module.exports.execute = async (sock, msg, args) => {
     if (!prompt) return await sock.sendMessage(chatId, { text: "❌ Provide prompt:.etias image a cat" }, { quoted: msg });
 
     try {
-      await sock.sendMessage(chatId, { text: `🎨 *Generating image...*\nPrompt: ${prompt}\n\n> POWERED BY ETIAS-TECH` }, { quoted: msg });
+      await sock.sendMessage(chatId, { text: `🎨 *Generating image...*\nPrompt: ${prompt}\n\n> *POWERED BY ETIAS-TECH*` }, { quoted: msg });
 
       const res = await axios.post(`${BASE_URL}/image/generate`, {
         prompt: prompt,
@@ -86,13 +86,13 @@ module.exports.execute = async (sock, msg, args) => {
       // If url is base64
       if (imageUrl.startsWith("data:") || imageUrl.length > 1000 &&!imageUrl.startsWith("http")) {
         const buffer = Buffer.from(imageUrl.split(",").pop(), 'base64');
-        await sock.sendMessage(chatId, { image: buffer, caption: `🎨 *Prompt:* ${prompt}\n\n> POWERED BY ETIAS-TECH` }, { quoted: msg });
+        await sock.sendMessage(chatId, { image: buffer, caption: `🎨 *Prompt:* ${prompt}\n\n> *POWERED BY ETIAS-TECH*` }, { quoted: msg });
       } else {
-        await sock.sendMessage(chatId, { image: { url: imageUrl }, caption: `🎨 *Prompt:* ${prompt}\n\n> POWERED BY ETIAS-TECH` }, { quoted: msg });
+        await sock.sendMessage(chatId, { image: { url: imageUrl }, caption: `🎨 *Prompt:* ${prompt}\n\n> *POWERED BY ETIAS-TECH*` }, { quoted: msg });
       }
 
     } catch (e) {
-      await sock.sendMessage(chatId, { text: `❌ Image failed: ${e.response?.data?.message || e.message}\n\n> POWERED BY ETIAS-TECH` }, { quoted: msg });
+      await sock.sendMessage(chatId, { text: `❌ Image failed: ${e.response?.data?.message || e.message}\n\n> *POWERED BY ETIAS-TECH*` }, { quoted: msg });
     }
     return;
   }
@@ -131,13 +131,13 @@ ${reply}
 ┃
 ╰━━━━━━━━━━━━━━━━━━┈⊷
 
-> POWERED BY ETIAS-TECH
+> *POWERED BY ETIAS-TECH*
 `;
 
     await sock.sendMessage(chatId, { text: finalText }, { quoted: msg });
 
   } catch (e) {
     const errMsg = e.response?.data? JSON.stringify(e.response.data).slice(0,500) : e.message;
-    await sock.sendMessage(chatId, { text: `❌ *API Error*\n\n${errMsg}\n\nBase: ${BASE_URL}\n\n> POWERED BY ETIAS-TECH` }, { quoted: msg });
+    await sock.sendMessage(chatId, { text: `❌ *API Error*\n\n${errMsg}\n\nBase: ${BASE_URL}\n\n> *POWERED BY ETIAS-TECH*` }, { quoted: msg });
   }
 };

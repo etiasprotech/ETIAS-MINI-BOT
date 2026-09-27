@@ -20,15 +20,15 @@ module.exports.execute = async (sock, msg, args) => {
     const isBotAdmin = groupMeta.participants.find(p => p.id === botId)?.admin;
 
     if (!isSenderAdmin) {
-      return await sock.sendMessage(chatId, { text: "❌ *Admins only.*\n\n> POWERED BY ETIAS-TECH" }, { quoted: msg });
+      return await sock.sendMessage(chatId, { text: "❌ *Admins only.*\n\n> *POWERED BY ETIAS-TECH*" }, { quoted: msg });
     }
     if (!isBotAdmin) {
-      return await sock.sendMessage(chatId, { text: "❌ *Bot must be admin to mute.*\n\n> POWERED BY ETIAS-TECH" }, { quoted: msg });
+      return await sock.sendMessage(chatId, { text: "❌ *Bot must be admin to mute.*\n\n> *POWERED BY ETIAS-TECH*" }, { quoted: msg });
     }
 
     // Check if already closed
     if (groupMeta.announce === true || groupMeta.announce === 'true') {
-      return await sock.sendMessage(chatId, { text: "⚠️ Group is already closed / muted.\n\n> POWERED BY ETIAS-TECH" }, { quoted: msg });
+      return await sock.sendMessage(chatId, { text: "⚠️ Group is already closed / muted.\n\n> *POWERED BY ETIAS-TECH*" }, { quoted: msg });
     }
 
     try { await sock.sendMessage(chatId, { react: { text: "🔒", key: msg.key } }); } catch {}
@@ -47,7 +47,7 @@ module.exports.execute = async (sock, msg, args) => {
 
 > *POWERED BY ETIAS-TECH*
 `;
-    const footer = "ETIAS-AI • POWERED BY ETIAS-TECH";
+    const footer = "*ETIAS-MINI-BOT • POWERED BY ETIAS-TECH*";
     const buttons = [
       { buttonId: '.unmute', buttonText: { displayText: '🔓 UNMUTE' }, type: 1 },
       { buttonId: '.tagall', buttonText: { displayText: '👥 TAGALL' }, type: 1 }
@@ -74,6 +74,6 @@ module.exports.execute = async (sock, msg, args) => {
 
   } catch (e) {
     console.log('[MUTE ERROR]', e.message);
-    await sock.sendMessage(chatId, { text: `❌ Failed to mute: ${e.message}\n\n> POWERED BY ETIAS-TECH` }, { quoted: msg });
+    await sock.sendMessage(chatId, { text: `❌ Failed to mute: ${e.message}\n\n> *POWERED BY ETIAS-TECH*` }, { quoted: msg });
   }
 };
