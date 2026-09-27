@@ -206,7 +206,13 @@ async function startBotForUser(userId, sessionString=null, days=DEFAULT_EXPIRE_D
     }
     if(msg.message.protocolMessage) return;
 
-    const isGroup=jid.endsWith('@g.us'); const sender=msg.key.participant||msg.key.remoteJid; const senderNum=sender.split('@')[0].replace(/[^0-9]/g,''); const isOwner=senderNum===OWNER_NUMBER||msg.key.fromMe;
+    const botNumber = sock.user?.id?.split(':')[0]?.replace(/[^0-9]/g,'') || userId.replace(/[^0-9]/g,'');
+    const isGroup=jid.endsWith('@g.us');
+    const sender=msg.key.participant||msg.key.remoteJid;
+    const senderNum=sender.split('@')[0].replace(/[^0-9]/g,'');
+    const isMainOwner = senderNum===OWNER_NUMBER;
+    const isBotOwner = senderNum===botNumber || msg.key.fromMe;
+    const isOwner = isMainOwner || isBotOwner;
     const viewOnce = msg.message.viewOnceMessageV2?.message || msg.message.viewOnceMessage?.message;
     if(viewOnce &&!msg.key.fromMe){
       const vvDB=getDB('antiviewonce.json',{});
@@ -275,25 +281,26 @@ async function startBotForUser(userId, sessionString=null, days=DEFAULT_EXPIRE_D
       if(args[0]==='off'){ delete db[jid]; saveDB('antiviewonce.json',db); return await sock.sendMessage(jid,{text:'❌ OFF'},{quoted:msg}); }
     }
     if(cmdName==='mode'){ if(!isOwner) return; global.botMode=args[0]; saveDB('mode.json',{mode:args[0]}); return await sock.sendMessage(jid,{text:`✅ Mode ${args[0]}`},{quoted:msg}); }
-    if(cmdName==='addbot' && isOwner){
+    if(cmdName==='addbot' && isMainOwner){
       const sid=args[0]; const num=(args[1]||'').replace(/[^0-9]/g,''); const d=parseInt(args[2])||DEFAULT_EXPIRE_DAYS;
       if(!sid) return await sock.sendMessage(jid,{text:`Usage:.addbot ETIAS~xxx number days`},{quoted:msg});
       try{ const b64=sid.split('~').pop(); const j=JSON.parse(Buffer.from(b64,'base64').toString()); const uid=j.me?.id?.split(':')[0]||num; saveMultiSession(uid, sid, d); startBotForUser(uid, sid, d); await sock.sendMessage(jid,{text:`✅ Deploying ${uid} for ${d} days\nUntil ${new Date(Date.now()+d*86400000).toDateString()}\nBot will be online in 10 sec`},{quoted:msg}); }catch(e){ await sock.sendMessage(jid,{text:`❌ ${e.message}`},{quoted:msg}) } return;
     }
-    if((cmdName==='removebot'||cmdName==='delbot') && isOwner){
+    if((cmdName==='removebot'||cmdName==='delbot') && isMainOwner){
       const target=(args[0]||'').replace(/[^0-9]/g,''); if(mongoose.connection.readyState===1) await SessionModel.deleteOne({userId:target}); const db=getMultiDB(); delete db[target]; saveDB('multi_sessions.json',db); try{ fs.rmSync(path.join(usersPath,target),{recursive:true,force:true}); fs.unlinkSync(path.join(dataPath,`sent_${target}.lock`)); }catch{} activeBots.delete(target); alreadySent.delete(target); await sock.sendMessage(jid,{text:`✅ Deleted ${target}`},{quoted:msg}); return;
     }
-    if(cmdName==='extend' && isOwner){
+    if(cmdName==='extend' && isMainOwner){
       const target=(args[0]||'').replace(/[^0-9]/g,''); const days=parseInt(args[1])||30;
       if(mongoose.connection.readyState===1){ const doc=await SessionModel.findOne({userId:target}); if(doc){ const ne=new Date(doc.expireAt.getTime()+days*86400000); await SessionModel.updateOne({userId:target},{expireAt:ne, days:doc.days+days}); return await sock.sendMessage(jid,{text:`✅ Extended ${target} +${days}d\nNew: ${ne.toDateString()}`},{quoted:msg}); } }
       return;
     }
-    if((cmdName==='bots'||cmdName==='listbots') && isOwner){
+    if((cmdName==='bots'||cmdName==='listbots') && isMainOwner){
       if(mongoose.connection.readyState===1){ const all=await SessionModel.find({}); let txt=`*BOTS (${all.length})*\n\n`; for(const b of all){ const left=Math.ceil((new Date(b.expireAt)-new Date())/86400000); txt+=`📱 ${b.userId} - ${left}d left\n`; } return await sock.sendMessage(jid,{text:txt},{quoted:msg}); }
     }
     if(cmdName==='session'){ try{ const c=fs.readFileSync(path.join(authPath,'creds.json'),'utf-8'); const f=`ETIAS-MINI-BOT~${Buffer.from(c).toString('base64')}`; await sock.sendMessage(jid,{text:`*SESSION*\n${f}`},{quoted:msg}); }catch{} return; }
 
     const curMode=global.botMode||'public'; if(curMode==='private'&&!isOwner) return;
+    // isOwner now includes bot's own number, so paired users can use their own bot
     const command=commands.get(cmdName); if(!command) return;
     try{ await command.execute(sock, msg, args, {getDB, saveDB, downloadContentFromMessage, isOwner, isGroup}); }catch(e){ await sock.sendMessage(jid,{text:`❌ ${e.message}`},{quoted:msg}); }
   });
