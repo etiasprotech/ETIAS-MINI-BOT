@@ -87,44 +87,25 @@ function askNumber(){ const rl=readline.createInterface({input:process.stdin,out
 
 const msgCache=new Map();
 const activeBots=new Map();
-const alreadySent = new Set(); // FIX SPAM
+const alreadySent = new Set();
 
-// === SEND SESSION ONLY ONCE ===
 async function sendSessionDM(sock, authPath){
   try{
     const myNumber = sock.user?.id?.split(':')[0];
     if(!myNumber) return;
-    if(alreadySent.has(myNumber)) return; // spam fix
+    if(alreadySent.has(myNumber)) return;
     alreadySent.add(myNumber);
-
     await new Promise(r=>setTimeout(r, 12000));
     const credsPath = path.join(authPath,'creds.json');
     if(!fs.existsSync(credsPath)) return;
     const creds = fs.readFileSync(credsPath,'utf-8');
     const full = `ETIAS-MINI-BOT~${Buffer.from(creds).toString('base64')}`;
-
-    // Lock file prevents re-send on restart
     const lockFile = path.join(dataPath, `sent_${myNumber}.lock`);
     if(fs.existsSync(lockFile) && (Date.now() - fs.statSync(lockFile).mtimeMs < 12*60*60*1000)) return;
-
-    const userMsg = `✅ *${BOT_NAME} CONNECTED!*
-
-📱 Number: ${myNumber}
-⏰ Package: ${DEFAULT_EXPIRE_DAYS} days
-
-*🔑 YOUR SESSION ID:*
-${full}
-
-*👉 NEXT STEP:*
-Copy this entire Session and send it to Owner:
-wa.me/${OWNER_NUMBER}?text=Hi%20Owner%20here%20is%20my%20session:%20${encodeURIComponent(full)}
-
-Owner will deploy it and your bot will be online 24/7.`;
-
+    const userMsg = `✅ *${BOT_NAME} CONNECTED!*\n\n📱 Number: ${myNumber}\n⏰ Package: ${DEFAULT_EXPIRE_DAYS} days\n\n*🔑 YOUR SESSION ID:*\n${full}\n\n*👉 NEXT STEP:*\nCopy this entire Session and send it to Owner:\nwa.me/${OWNER_NUMBER}?text=Hi%20Owner%20here%20is%20my%20session:%20${encodeURIComponent(full)}\n\nOwner will deploy it and your bot will be online 24/7.`;
     await sock.sendMessage(sock.user.id, { text: userMsg });
     fs.writeFileSync(lockFile, 'sent');
     console.log(`[DM SENT ONCE] ${myNumber}`);
-
   }catch(e){ console.log("[DM FAIL]", e.message) }
 }
 
@@ -161,7 +142,6 @@ async function startBotForUser(userId, sessionString=null, days=DEFAULT_EXPIRE_D
         const creds=fs.readFileSync(path.join(authPath,'creds.json'),'utf-8');
         const full=`ETIAS-MINI-BOT~${Buffer.from(creds).toString('base64')}`; const saveId=sock.user.id.split(':')[0];
         saveMultiSession(saveId, full, days);
-        // Only send if not already sent
         if(!alreadySent.has(saveId)) sendSessionDM(sock, authPath);
       }catch(e){}
     }
@@ -185,177 +165,112 @@ async function startBotForUser(userId, sessionString=null, days=DEFAULT_EXPIRE_D
   });
 
   sock.ev.on('messages.upsert', async ({messages}) => {
-  for (const msg of messages) {
-    try {
-      if (!msg.message) continue;
-      const jid = msg.key.remoteJid;
-      const sender = msg.key.participant || jid;
-      const text = msg.message.conversation || msg.message.extendedTextMessage?.text || msg.message.imageMessage?.caption || msg.message.videoMessage?.caption || "";
-
-      console.log(`[MSG] jid=${jid} fromMe=${msg.key.fromMe} text=${text.slice(0,40)} sock=${sock.user.id}`);
-
-      if (jid === 'status@broadcast') continue;
-
-      // DYNAMIC OWNER = this bot's own number (supports paired users)
-      const botNumber = sock.user.id.split(':')[0].split('@')[0].split('-')[0];
-      const senderNum = sender.split('@')[0].split(':')[0].split('-')[0];
-
-      const isSelf = jid === sock.user.id || msg.key.fromMe || senderNum === botNumber;
-      const isOwner = isSelf || senderNum === botNumber; // Paired user is always owner of their own bot
-
-      // Allow DMs from anyone if public, but always allow owner/self
-      const isGroup = jid.endsWith('@g.us');
-      if (!isGroup &&!isOwner) {
-        // If mode is public, allow. We force public for paired bots
-        // console.log(`[DM] Non-owner ${senderNum} to bot ${botNumber} - allowing (public mode)`);
-      }
-
-      if (!text.startsWith('.')) continue;
-
-      const args = text.slice(1).trim().split(/ +/);
-      const cmdName = args.shift().toLowerCase();
-
-      console.log(`[CMD TRY].${cmdName} by ${senderNum} on bot ${botNumber} isOwner=${isOwner} isSelf=${isSelf}`);
-
-      const command = commands.get(cmdName);
-      if (!command) {
-        console.log(`[CMD NOT FOUND] ${cmdName} Available: ${[...commands.keys()].join(',').slice(0,100)}`);
-        await sock.sendMessage(jid, {text: `❌ Command.${cmdName} not found. Type.menu`}, {quoted: msg});
-        continue;
-      }
-
-      // Pass isOwner + botNumber to command
-      await command.execute(sock, msg, args, {isOwner: true, isGroup, botNumber, senderNum});
-      console.log(`[CMD OK] ${cmdName} on ${botNumber}`);
-
-    } catch(e) {
-      console.log(`[CMD ERROR] ${e.message}`);
-      try { await sock.sendMessage(msg.key.remoteJid, {text: `❌ Error: ${e.message}`}, {quoted: msg}); } catch {}
-    }
-  }
-});
-
-    if(!msg.message.protocolMessage){
-      const type=Object.keys(msg.message)[0];
-      if(['conversation','extendedTextMessage','imageMessage','videoMessage'].includes(type)){
-        msgCache.set(msg.key.id, { jid, sender: msg.key.participant||msg.key.remoteJid, text: msg.message.conversation||msg.message.extendedTextMessage?.text||msg.message.imageMessage?.caption||`[${type}]`, message: msg.message, time: new Date() });
-      }
-    }
-    if(msg.message.protocolMessage?.type===0){
-      const adDB=getDB('antidelete.json',{});
-      if(adDB[jid]?.enabled || adDB['global']?.enabled){
-        const cached=msgCache.get(msg.message.protocolMessage.key.id);
-        if(cached){
-          try{ await sock.sendMessage(jid,{ text:`*ANTI-DELETE*\n👤 @${cached.sender.split('@')[0]}\n📝 ${cached.text}`, mentions:[cached.sender] }); }catch{}
-        }
-      }
-      return;
-    }
-    if(msg.message.protocolMessage) return;
-
-    const botNumber = sock.user?.id?.split(':')[0]?.replace(/[^0-9]/g,'') || userId.replace(/[^0-9]/g,'');
-    const isGroup=jid.endsWith('@g.us');
-    const sender=msg.key.participant||msg.key.remoteJid;
-    const senderNum=sender.split('@')[0].replace(/[^0-9]/g,'');
-    const isMainOwner = senderNum===OWNER_NUMBER;
-    const isBotOwner = senderNum===botNumber || msg.key.fromMe;
-    const isOwner = isMainOwner || isBotOwner;
-    const viewOnce = msg.message.viewOnceMessageV2?.message || msg.message.viewOnceMessage?.message;
-    if(viewOnce &&!msg.key.fromMe){
-      const vvDB=getDB('antiviewonce.json',{});
-      if(vvDB[jid]?.enabled || vvDB['global']?.enabled){
-        try{
-          const type=Object.keys(viewOnce)[0]; const media=viewOnce[type];
-          let buffer=Buffer.from([]); const stream=await downloadContentFromMessage(media, type.replace('Message',''));
-          for await(const chunk of stream) buffer=Buffer.concat([buffer,chunk]);
-          if(buffer.length){
-            if(type==='imageMessage') await sock.sendMessage(jid,{image:buffer, caption:`*VIEWONCE* @${sender.split('@')[0]}`, mentions:[sender]}, {quoted:msg});
-            if(type==='videoMessage') await sock.sendMessage(jid,{video:buffer, caption:`*VIEWONCE*`, mentions:[sender]}, {quoted:msg});
+    for (const msg of messages) {
+      try {
+        if (!msg.message) continue;
+        const jid = msg.key.remoteJid;
+        if (jid === 'status@broadcast') continue;
+        const sender = msg.key.participant || jid;
+        const textRaw = msg.message.conversation || msg.message.extendedTextMessage?.text || msg.message.imageMessage?.caption || msg.message.videoMessage?.caption || "";
+        const text = textRaw.trim();
+        console.log(`[MSG] jid=${jid} fromMe=${msg.key.fromMe} text=${text.slice(0,40)} sock=${sock.user.id}`);
+        if(!msg.message.protocolMessage){
+          const type=Object.keys(msg.message)[0];
+          if(['conversation','extendedTextMessage','imageMessage','videoMessage'].includes(type)){
+            msgCache.set(msg.key.id, { jid, sender: msg.key.participant||msg.key.remoteJid, text: msg.message.conversation||msg.message.extendedTextMessage?.text||msg.message.imageMessage?.caption||`[${type}]`, message: msg.message, time: new Date() });
           }
-        }catch{}
-      }
-    }
-
-    let text=msg.message.conversation||msg.message.extendedTextMessage?.text||msg.message.imageMessage?.caption||""; if(!text) return; text=text.trim();
-
-    if(isGroup &&!text.startsWith(PREFIX) &&!msg.key.fromMe){
-      const db=getDB('antilink.json',{});
-      if(db[jid]?.enabled && /(https?:\/\/|chat\.whatsapp\.com)/i.test(text)){
+        }
+        if(msg.message.protocolMessage?.type===0){
+          const adDB=getDB('antidelete.json',{});
+          if(adDB[jid]?.enabled || adDB['global']?.enabled){
+            const cached=msgCache.get(msg.message.protocolMessage.key.id);
+            if(cached){
+              try{ await sock.sendMessage(jid,{ text:`*ANTI-DELETE*\n👤 @${cached.sender.split('@')[0]}\n📝 ${cached.text}`, mentions:[cached.sender] }); }catch{}
+            }
+          }
+          continue;
+        }
+        if(msg.message.protocolMessage) continue;
+        const botNumber = sock.user.id.split(':')[0].split('@')[0].split('-')[0];
+        const senderNum = sender.split('@')[0].split(':')[0].split('-')[0];
+        const isSelf = msg.key.fromMe || senderNum === botNumber;
+        const isGroup = jid.endsWith('@g.us');
+        const viewOnce = msg.message.viewOnceMessageV2?.message || msg.message.viewOnceMessage?.message;
+        if(viewOnce &&!msg.key.fromMe){
+          const vvDB=getDB('antiviewonce.json',{});
+          if(vvDB[jid]?.enabled || vvDB['global']?.enabled){
+            try{
+              const type=Object.keys(viewOnce)[0]; const media=viewOnce[type];
+              let buffer=Buffer.from([]); const stream=await downloadContentFromMessage(media, type.replace('Message',''));
+              for await(const chunk of stream) buffer=Buffer.concat([buffer,chunk]);
+              if(buffer.length){
+                if(type==='imageMessage') await sock.sendMessage(jid,{image:buffer, caption:`*VIEWONCE* @${sender.split('@')[0]}`, mentions:[sender]}, {quoted:msg});
+                if(type==='videoMessage') await sock.sendMessage(jid,{video:buffer, caption:`*VIEWONCE*`, mentions:[sender]}, {quoted:msg});
+              }
+            }catch{}
+          }
+  }
+                if(!text.startsWith(PREFIX)) continue;
+        const args=text.slice(PREFIX.length).trim().split(/ +/); const cmdName=args.shift().toLowerCase();
+        if(!cmdName) continue;
+        if(cmdName==='welcome' && isGroup){
+          const db=getDB('welcome.json',{}); if(args[0]==='on'){ db[jid]={enabled:true, msg:args.slice(1).join(' ')||null}; saveDB('welcome.json',db); await sock.sendMessage(jid,{text:'✅ Welcome ON'},{quoted:msg}); continue; }
+          if(args[0]==='off'){ delete db[jid]; saveDB('welcome.json',db); await sock.sendMessage(jid,{text:'❌ Welcome OFF'},{quoted:msg}); continue; }
+        }
+        if(cmdName==='goodbye' && isGroup){
+          const db=getDB('goodbye.json',{}); if(args[0]==='on'){ db[jid]={enabled:true}; saveDB('goodbye.json',db); await sock.sendMessage(jid,{text:'✅ Goodbye ON'},{quoted:msg}); continue; }
+          if(args[0]==='off'){ delete db[jid]; saveDB('goodbye.json',db); await sock.sendMessage(jid,{text:'❌ Goodbye OFF'},{quoted:msg}); continue; }
+        }
+        if(cmdName==='antilink' && isGroup){
+          const db=getDB('antilink.json',{}); if(args[0]==='on'){ db[jid]={enabled:true}; saveDB('antilink.json',db); await sock.sendMessage(jid,{text:'✅ AntiLink ON'},{quoted:msg}); continue; }
+          if(args[0]==='off'){ delete db[jid]; saveDB('antilink.json',db); await sock.sendMessage(jid,{text:'❌ AntiLink OFF'},{quoted:msg}); continue; }
+        }
+        if(cmdName==='antidelete'){
+          const db=getDB('antidelete.json',{}); if(args[0]==='on'){ db[jid]={enabled:true}; saveDB('antidelete.json',db); await sock.sendMessage(jid,{text:'✅ AntiDelete ON'},{quoted:msg}); continue; }
+          if(args[0]==='off'){ delete db[jid]; saveDB('antidelete.json',db); await sock.sendMessage(jid,{text:'❌ OFF'},{quoted:msg}); continue; }
+        }
+        if(cmdName==='antiviewonce' || cmdName==='viewonce'){
+          const db=getDB('antiviewonce.json',{}); if(args[0]==='on'){ db[jid]={enabled:true}; saveDB('antiviewonce.json',db); await sock.sendMessage(jid,{text:'✅ AntiViewOnce ON'},{quoted:msg}); continue; }
+          if(args[0]==='off'){ delete db[jid]; saveDB('antiviewonce.json',db); await sock.sendMessage(jid,{text:'❌ OFF'},{quoted:msg}); continue; }
+        }
+        if(cmdName==='mode'){ if(!isSelf && senderNum!==OWNER_NUMBER) continue; global.botMode=args[0]; saveDB('mode.json',{mode:args[0]}); await sock.sendMessage(jid,{text:`✅ Mode ${args[0]}`},{quoted:msg}); continue; }
+        if(cmdName==='addbot' && senderNum===OWNER_NUMBER){
+          const sid=args[0]; const num=(args[1]||'').replace(/[^0-9]/g,''); const d=parseInt(args[2])||DEFAULT_EXPIRE_DAYS;
+          if(!sid) { await sock.sendMessage(jid,{text:`Usage:.addbot ETIAS~xxx number days`},{quoted:msg}); continue; }
+          try{ const b64=sid.split('~').pop(); const j=JSON.parse(Buffer.from(b64,'base64').toString()); const uid=j.me?.id?.split(':')[0]||num; saveMultiSession(uid, sid, d); startBotForUser(uid, sid, d); await sock.sendMessage(jid,{text:`✅ Deploying ${uid} for ${d} days\nUntil ${new Date(Date.now()+d*86400000).toDateString()}\nBot will be online in 10 sec`},{quoted:msg}); }catch(e){ await sock.sendMessage(jid,{text:`❌ ${e.message}`},{quoted:msg}) } continue;
+        }
+        if((cmdName==='removebot'||cmdName==='delbot') && senderNum===OWNER_NUMBER){
+          const target=(args[0]||'').replace(/[^0-9]/g,''); if(mongoose.connection.readyState===1) await SessionModel.deleteOne({userId:target}); const db=getMultiDB(); delete db[target]; saveDB('multi_sessions.json',db); try{ fs.rmSync(path.join(usersPath,target),{recursive:true,force:true}); fs.unlinkSync(path.join(dataPath,`sent_${target}.lock`)); }catch{} activeBots.delete(target); alreadySent.delete(target); await sock.sendMessage(jid,{text:`✅ Deleted ${target}`},{quoted:msg}); continue;
+        }
+        if(cmdName==='extend' && senderNum===OWNER_NUMBER){
+          const target=(args[0]||'').replace(/[^0-9]/g,''); const days=parseInt(args[1])||30;
+          if(mongoose.connection.readyState===1){ const doc=await SessionModel.findOne({userId:target}); if(doc){ const ne=new Date(doc.expireAt.getTime()+days*86400000); await SessionModel.updateOne({userId:target},{expireAt:ne, days:doc.days+days}); await sock.sendMessage(jid,{text:`✅ Extended ${target} +${days}d\nNew: ${ne.toDateString()}`},{quoted:msg}); continue; } }
+          continue;
+        }
+        if((cmdName==='bots'||cmdName==='listbots') && senderNum===OWNER_NUMBER){
+          if(mongoose.connection.readyState===1){ const all=await SessionModel.find({}); let txt=`*BOTS (${all.length})*\n\n`; for(const b of all){ const left=Math.ceil((new Date(b.expireAt)-new Date())/86400000); txt+=`📱 ${b.userId} - ${left}d left\n`; } await sock.sendMessage(jid,{text:txt},{quoted:msg}); continue; }
+        }
+        if(cmdName==='session'){ try{ const c=fs.readFileSync(path.join(authPath,'creds.json'),'utf-8'); const f=`ETIAS-MINI-BOT~${Buffer.from(c).toString('base64')}`; await sock.sendMessage(jid,{text:`*SESSION*\n${f}`},{quoted:msg}); }catch{} continue; }
+        const curMode=global.botMode||'public'; if(curMode==='private' &&!isSelf && senderNum!==OWNER_NUMBER) { console.log(`[BLOCK PRIVATE] ${cmdName} from ${senderNum}`); continue; }
+        console.log(`[CMD TRY].${cmdName} by ${senderNum} on bot ${botNumber} isSelf=${isSelf} isGroup=${isGroup}`);
+        const command=commands.get(cmdName);
+        if(!command){
+          console.log(`[CMD NOT FOUND] ${cmdName}`);
+          await sock.sendMessage(jid,{text:`❌ Command.${cmdName} not found. Type.menu`},{quoted:msg});
+          continue;
+        }
         try{
-          const meta=await sock.groupMetadata(jid);
-          const isAdmin=meta.participants.find(p=>p.id===sender)?.admin;
-          const botId=sock.user.id.split(':')[0]+'@s.whatsapp.net';
-          const isBotAdmin=meta.participants.find(p=>p.id===botId||p.id===sock.user.id)?.admin;
-          if(!isAdmin &&!isOwner && isBotAdmin){ await sock.sendMessage(jid,{delete:msg.key}); }
-        }catch{}
+          await command.execute(sock, msg, args, {getDB, saveDB, downloadContentFromMessage, isOwner: true, isGroup, botNumber, senderNum});
+          console.log(`[CMD OK] ${cmdName} on ${botNumber}`);
+        }catch(e){
+          console.log(`[CMD ERROR] ${e.message}`);
+          await sock.sendMessage(jid,{text:`❌ ${e.message}`},{quoted:msg});
+        }
+      } catch(e){
+        console.log(`[HANDLER ERROR] ${e.message}`);
       }
     }
-
-    // STOP LOOP: ignore own messages containing session
-    if(isOwner && text.includes('ETIAS-MINI-BOT~') && text.length>100 &&!text.startsWith('.') &&!msg.key.fromMe){
-      const m=text.match(/ETIAS-MINI-BOT~[A-Za-z0-9+\/=]+/);
-      if(m){
-        const sid=m[0];
-        try{
-          const b64=sid.split('~').pop(); const j=JSON.parse(Buffer.from(b64,'base64').toString()); const uid=j.me?.id?.split(':')[0]||senderNum;
-          await sock.sendMessage(jid,{text:`🔍 Session from ${uid}\nGo to deploy panel: /admin?key=${ADMIN_KEY}\nOr type:\n.addbot ${sid} ${uid} ${DEFAULT_EXPIRE_DAYS}`},{quoted:msg});
-        }catch{}
-      }
-      return;
-    }
-
-    if(!text.startsWith(PREFIX)) return;
-    const args=text.slice(PREFIX.length).trim().split(/ +/); const cmdName=args.shift().toLowerCase();
-
-    if(cmdName==='welcome' && isGroup){
-      const db=getDB('welcome.json',{}); if(args[0]==='on'){ db[jid]={enabled:true, msg:args.slice(1).join(' ')||null}; saveDB('welcome.json',db); return await sock.sendMessage(jid,{text:'✅ Welcome ON'},{quoted:msg}); }
-      if(args[0]==='off'){ delete db[jid]; saveDB('welcome.json',db); return await sock.sendMessage(jid,{text:'❌ Welcome OFF'},{quoted:msg}); }
-    }
-    if(cmdName==='goodbye' && isGroup){
-      const db=getDB('goodbye.json',{}); if(args[0]==='on'){ db[jid]={enabled:true}; saveDB('goodbye.json',db); return await sock.sendMessage(jid,{text:'✅ Goodbye ON'},{quoted:msg}); }
-      if(args[0]==='off'){ delete db[jid]; saveDB('goodbye.json',db); return await sock.sendMessage(jid,{text:'❌ Goodbye OFF'},{quoted:msg}); }
-    }
-    if(cmdName==='antilink' && isGroup){
-      const db=getDB('antilink.json',{}); if(args[0]==='on'){ db[jid]={enabled:true}; saveDB('antilink.json',db); return await sock.sendMessage(jid,{text:'✅ AntiLink ON'},{quoted:msg}); }
-      if(args[0]==='off'){ delete db[jid]; saveDB('antilink.json',db); return await sock.sendMessage(jid,{text:'❌ AntiLink OFF'},{quoted:msg}); }
-    }
-    if(cmdName==='antidelete'){
-      const db=getDB('antidelete.json',{}); if(args[0]==='on'){ db[jid]={enabled:true}; saveDB('antidelete.json',db); return await sock.sendMessage(jid,{text:'✅ AntiDelete ON'},{quoted:msg}); }
-      if(args[0]==='off'){ delete db[jid]; saveDB('antidelete.json',db); return await sock.sendMessage(jid,{text:'❌ OFF'},{quoted:msg}); }
-    }
-    if(cmdName==='antiviewonce' || cmdName==='viewonce'){
-      const db=getDB('antiviewonce.json',{}); if(args[0]==='on'){ db[jid]={enabled:true}; saveDB('antiviewonce.json',db); return await sock.sendMessage(jid,{text:'✅ AntiViewOnce ON'},{quoted:msg}); }
-      if(args[0]==='off'){ delete db[jid]; saveDB('antiviewonce.json',db); return await sock.sendMessage(jid,{text:'❌ OFF'},{quoted:msg}); }
-    }
-    if(cmdName==='mode'){ if(!isOwner) return; global.botMode=args[0]; saveDB('mode.json',{mode:args[0]}); return await sock.sendMessage(jid,{text:`✅ Mode ${args[0]}`},{quoted:msg}); }
-    if(cmdName==='addbot' && isMainOwner){
-      const sid=args[0]; const num=(args[1]||'').replace(/[^0-9]/g,''); const d=parseInt(args[2])||DEFAULT_EXPIRE_DAYS;
-      if(!sid) return await sock.sendMessage(jid,{text:`Usage:.addbot ETIAS~xxx number days`},{quoted:msg});
-      try{ const b64=sid.split('~').pop(); const j=JSON.parse(Buffer.from(b64,'base64').toString()); const uid=j.me?.id?.split(':')[0]||num; saveMultiSession(uid, sid, d); startBotForUser(uid, sid, d); await sock.sendMessage(jid,{text:`✅ Deploying ${uid} for ${d} days\nUntil ${new Date(Date.now()+d*86400000).toDateString()}\nBot will be online in 10 sec`},{quoted:msg}); }catch(e){ await sock.sendMessage(jid,{text:`❌ ${e.message}`},{quoted:msg}) } return;
-    }
-    if((cmdName==='removebot'||cmdName==='delbot') && isMainOwner){
-      const target=(args[0]||'').replace(/[^0-9]/g,''); if(mongoose.connection.readyState===1) await SessionModel.deleteOne({userId:target}); const db=getMultiDB(); delete db[target]; saveDB('multi_sessions.json',db); try{ fs.rmSync(path.join(usersPath,target),{recursive:true,force:true}); fs.unlinkSync(path.join(dataPath,`sent_${target}.lock`)); }catch{} activeBots.delete(target); alreadySent.delete(target); await sock.sendMessage(jid,{text:`✅ Deleted ${target}`},{quoted:msg}); return;
-    }
-    if(cmdName==='extend' && isMainOwner){
-      const target=(args[0]||'').replace(/[^0-9]/g,''); const days=parseInt(args[1])||30;
-      if(mongoose.connection.readyState===1){ const doc=await SessionModel.findOne({userId:target}); if(doc){ const ne=new Date(doc.expireAt.getTime()+days*86400000); await SessionModel.updateOne({userId:target},{expireAt:ne, days:doc.days+days}); return await sock.sendMessage(jid,{text:`✅ Extended ${target} +${days}d\nNew: ${ne.toDateString()}`},{quoted:msg}); } }
-      return;
-    }
-    if((cmdName==='bots'||cmdName==='listbots') && isMainOwner){
-      if(mongoose.connection.readyState===1){ const all=await SessionModel.find({}); let txt=`*BOTS (${all.length})*\n\n`; for(const b of all){ const left=Math.ceil((new Date(b.expireAt)-new Date())/86400000); txt+=`📱 ${b.userId} - ${left}d left\n`; } return await sock.sendMessage(jid,{text:txt},{quoted:msg}); }
-    }
-    if(cmdName==='session'){ try{ const c=fs.readFileSync(path.join(authPath,'creds.json'),'utf-8'); const f=`ETIAS-MINI-BOT~${Buffer.from(c).toString('base64')}`; await sock.sendMessage(jid,{text:`*SESSION*\n${f}`},{quoted:msg}); }catch{} return; }
-
-    const curMode=global.botMode||'public'; if(curMode==='private'&&!isOwner) return;
-    // isOwner now includes bot's own number, so paired users can use their own bot
-    console.log(`[CMD] ${cmdName} from ${senderNum} owner=${isOwner} jid=${jid}`);
-    const command=commands.get(cmdName); 
-    if(!command) {
-      console.log(`[CMD NOT FOUND] ${cmdName} - Available: ${[...commands.keys()].slice(0,10)}`);
-      return await sock.sendMessage(jid,{text:`❌ Command .${cmdName} not found. Type .menu`},{quoted:msg});
-    }
-    try{ await command.execute(sock, msg, args, {getDB, saveDB, downloadContentFromMessage, isOwner, isGroup}); console.log(`[CMD OK] ${cmdName}`); }catch(e){ console.log(`[CMD ERROR] ${e.message}`); await sock.sendMessage(jid,{text:`❌ ${e.message}`},{quoted:msg}); }
-
+  });
 }
 
 async function startAll(){
@@ -367,22 +282,17 @@ async function startAll(){
   else await startBotForUser('main');
 }
 
-// ===== EXPRESS WITH ADMIN DEPLOY PANEL =====
 const app=express(); app.use(express.json()); app.use(express.urlencoded({extended:true}));
-
 app.get('/', async (req,res)=>{
   const count=mongoose.connection.readyState===1?await SessionModel.countDocuments():Object.keys(getMultiDB()).length;
   res.send(`<html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{background:#0a0a0a;color:#fff;font-family:sans-serif;text-align:center;padding:20px}.card{background:#1a1a1a;padding:20px;border-radius:15px;max-width:500px;margin:auto}a.btn{display:block;background:#00ff88;color:#000;padding:15px;border-radius:10px;text-decoration:none;font-weight:bold;margin:10px 0}</style></head><body><h1>ETIAS MULTI</h1><div class="card"><p>Active: ${activeBots.size}/${count}</p><a class="btn" href="${PAIRING_SITE}" target="_blank">🔗 PAIRING SITE</a><a class="btn" href="/admin?key=${ADMIN_KEY}" style="background:#fff">🔧 DEPLOY PANEL (Owner)</a><a class="btn" href="/bots" style="background:#333;color:#fff">📋 JSON</a></div></body></html>`);
 });
-
-// DEPLOY PANEL
 app.get('/admin', async (req,res)=>{
   if(req.query.key!==ADMIN_KEY) return res.status(403).send('Forbidden -?key='+ADMIN_KEY);
   const all = mongoose.connection.readyState===1? await SessionModel.find({}) : [];
   let list = all.map(b=> `<tr><td>${b.userId}</td><td>${Math.ceil((new Date(b.expireAt)-new Date())/86400000)}d</td><td>${b.expireAt.toDateString()}</td><td><a href="/admin/delete?key=${ADMIN_KEY}&id=${b.userId}">Delete</a></td></tr>`).join('');
   res.send(`<html><head><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{background:#111;color:#fff;font-family:sans-serif;padding:20px}input,button{width:100%;padding:15px;margin:8px 0;border-radius:10px;border:0}input{background:#222;color:#fff}button{background:#00ff88;font-weight:bold;cursor:pointer}.card{background:#1a1a1a;padding:20px;border-radius:15px;max-width:600px;margin:auto}table{width:100%;border-collapse:collapse;margin-top:20px}td,th{border:1px solid #333;padding:8px;font-size:12px}</style></head><body><div class="card"><h2>🔧 DEPLOY PANEL</h2><p>User sends you Session ID. Paste here + set days + Deploy</p><form method="POST" action="/admin/add?key=${ADMIN_KEY}"><label>Session ID (ETIAS~...)</label><input name="session" placeholder="ETIAS-MINI-BOT~xxxx" required><label>Phone Number (optional)</label><input name="phone" placeholder="2637xxxxxx"><label>Duration (days)</label><input name="days" type="number" value="${DEFAULT_EXPIRE_DAYS}" required><button type="submit">🚀 DEPLOY BOT</button></form><h3>Bots (${all.length})</h3><table><tr><th>Number</th><th>Left</th><th>Expiry</th><th>Action</th></tr>${list||'<tr><td colspan=4>No bots</td></tr>'}</table><br><a href="/" style="color:#00ff88">Home</a></div></body></html>`);
 });
-
 app.post('/admin/add', async (req,res)=>{
   if(req.query.key!==ADMIN_KEY) return res.status(403).send('Forbidden');
   const sid=(req.body.session||'').trim(); const days=parseInt(req.body.days)||DEFAULT_EXPIRE_DAYS; const phone=(req.body.phone||'').replace(/[^0-9]/g,'');
@@ -396,7 +306,6 @@ app.post('/admin/add', async (req,res)=>{
     res.send(`<html><body style="background:#111;color:#fff;text-align:center;padding:50px;font-family:sans-serif"><h1>✅ Deployed ${userId} for ${days} days</h1><p>Until ${new Date(Date.now()+days*86400000).toDateString()}</p><p>Bot will be online in 10 seconds</p><a href="/admin?key=${ADMIN_KEY}" style="color:#00ff88">Back to Panel</a></body></html>`);
   }catch(e){ res.send('❌ Invalid session: '+e.message+'<br><a href="/admin?key='+ADMIN_KEY+'">Back</a>'); }
 });
-
 app.get('/admin/delete', async (req,res)=>{
   if(req.query.key!==ADMIN_KEY) return res.status(403).send('Forbidden');
   const id=(req.query.id||'').replace(/[^0-9]/g,''); if(mongoose.connection.readyState===1) await SessionModel.deleteOne({userId:id});
@@ -404,7 +313,6 @@ app.get('/admin/delete', async (req,res)=>{
   try{ fs.rmSync(path.join(usersPath,id),{recursive:true,force:true}); fs.unlinkSync(path.join(dataPath,`sent_${id}.lock`)); }catch{} activeBots.delete(id); alreadySent.delete(id);
   res.redirect('/admin?key='+ADMIN_KEY);
 });
-
 app.get('/add', async (req,res)=>{
   const sid=req.query.session; const days=parseInt(req.query.days)||DEFAULT_EXPIRE_DAYS;
   if(!sid) return res.send(`Use ${PAIRING_SITE}`);
@@ -414,6 +322,5 @@ app.get('/bots', async (req,res)=>{
   if(mongoose.connection.readyState===1){ const all=await SessionModel.find({}); return res.json(all.map(s=>({userId:s.userId, daysLeft: Math.ceil((new Date(s.expireAt)-new Date())/86400000), expireAt:s.expireAt}))); }
   res.json(getMultiDB());
 });
-
 app.listen(process.env.PORT||3000, ()=>console.log('[SERVER] 3000'));
 startAll();
