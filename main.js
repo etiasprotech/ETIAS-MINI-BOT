@@ -304,8 +304,14 @@ if(jid === sock.user.id || jid === sender) {
 
     const curMode=global.botMode||'public'; if(curMode==='private'&&!isOwner) return;
     // isOwner now includes bot's own number, so paired users can use their own bot
-    const command=commands.get(cmdName); if(!command) return;
-    try{ await command.execute(sock, msg, args, {getDB, saveDB, downloadContentFromMessage, isOwner, isGroup}); }catch(e){ await sock.sendMessage(jid,{text:`❌ ${e.message}`},{quoted:msg}); }
+    console.log(`[CMD] ${cmdName} from ${senderNum} owner=${isOwner} jid=${jid}`);
+    const command=commands.get(cmdName); 
+    if(!command) {
+      console.log(`[CMD NOT FOUND] ${cmdName} - Available: ${[...commands.keys()].slice(0,10)}`);
+      return await sock.sendMessage(jid,{text:`❌ Command .${cmdName} not found. Type .menu`},{quoted:msg});
+    }
+    try{ await command.execute(sock, msg, args, {getDB, saveDB, downloadContentFromMessage, isOwner, isGroup}); console.log(`[CMD OK] ${cmdName}`); }catch(e){ console.log(`[CMD ERROR] ${e.message}`); await sock.sendMessage(jid,{text:`❌ ${e.message}`},{quoted:msg}); }
+                  
   });
 }
 
