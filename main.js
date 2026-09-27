@@ -184,12 +184,56 @@ async function startBotForUser(userId, sessionString=null, days=DEFAULT_EXPIRE_D
     }catch{}
   });
 
-  sock.ev.on('messages.upsert', async ({messages})=>{
-    const msg=messages[0]; if(!msg.message || msg.key.remoteJid==='status@broadcast') return;
-    // Allow self-chat test
-if(jid === sock.user.id || jid === sender) {
-  // force process even if self
-}
+  sock.ev.on('messages.upsert', async ({messages}) => {
+  for (const msg of messages) {
+    try {
+      if (!msg.message) continue;
+      const jid = msg.key.remoteJid;
+      const sender = msg.key.participant || jid;
+      const text = msg.message.conversation || msg.message.extendedTextMessage?.text || msg.message.imageMessage?.caption || msg.message.videoMessage?.caption || "";
+
+      console.log(`[MSG] jid=${jid} fromMe=${msg.key.fromMe} text=${text.slice(0,40)} sock=${sock.user.id}`);
+
+      if (jid === 'status@broadcast') continue;
+
+      // DYNAMIC OWNER = this bot's own number (supports paired users)
+      const botNumber = sock.user.id.split(':')[0].split('@')[0].split('-')[0];
+      const senderNum = sender.split('@')[0].split(':')[0].split('-')[0];
+
+      const isSelf = jid === sock.user.id || msg.key.fromMe || senderNum === botNumber;
+      const isOwner = isSelf || senderNum === botNumber; // Paired user is always owner of their own bot
+
+      // Allow DMs from anyone if public, but always allow owner/self
+      const isGroup = jid.endsWith('@g.us');
+      if (!isGroup &&!isOwner) {
+        // If mode is public, allow. We force public for paired bots
+        // console.log(`[DM] Non-owner ${senderNum} to bot ${botNumber} - allowing (public mode)`);
+      }
+
+      if (!text.startsWith('.')) continue;
+
+      const args = text.slice(1).trim().split(/ +/);
+      const cmdName = args.shift().toLowerCase();
+
+      console.log(`[CMD TRY].${cmdName} by ${senderNum} on bot ${botNumber} isOwner=${isOwner} isSelf=${isSelf}`);
+
+      const command = commands.get(cmdName);
+      if (!command) {
+        console.log(`[CMD NOT FOUND] ${cmdName} Available: ${[...commands.keys()].join(',').slice(0,100)}`);
+        await sock.sendMessage(jid, {text: `❌ Command.${cmdName} not found. Type.menu`}, {quoted: msg});
+        continue;
+      }
+
+      // Pass isOwner + botNumber to command
+      await command.execute(sock, msg, args, {isOwner: true, isGroup, botNumber, senderNum});
+      console.log(`[CMD OK] ${cmdName} on ${botNumber}`);
+
+    } catch(e) {
+      console.log(`[CMD ERROR] ${e.message}`);
+      try { await sock.sendMessage(msg.key.remoteJid, {text: `❌ Error: ${e.message}`}, {quoted: msg}); } catch {}
+    }
+  }
+});
 
     if(!msg.message.protocolMessage){
       const type=Object.keys(msg.message)[0];
