@@ -186,7 +186,10 @@ async function startBotForUser(userId, sessionString=null, days=DEFAULT_EXPIRE_D
 
   sock.ev.on('messages.upsert', async ({messages})=>{
     const msg=messages[0]; if(!msg.message || msg.key.remoteJid==='status@broadcast') return;
-    const jid=msg.key.remoteJid;
+    // Allow self-chat test
+if(jid === sock.user.id || jid === sender) {
+  // force process even if self
+}
 
     if(!msg.message.protocolMessage){
       const type=Object.keys(msg.message)[0];
