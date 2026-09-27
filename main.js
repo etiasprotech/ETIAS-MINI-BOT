@@ -355,8 +355,7 @@ async function startBotForUser(userId, sessionString=null, days=DEFAULT_EXPIRE_D
       return await sock.sendMessage(jid,{text:`❌ Command .${cmdName} not found. Type .menu`},{quoted:msg});
     }
     try{ await command.execute(sock, msg, args, {getDB, saveDB, downloadContentFromMessage, isOwner, isGroup}); console.log(`[CMD OK] ${cmdName}`); }catch(e){ console.log(`[CMD ERROR] ${e.message}`); await sock.sendMessage(jid,{text:`❌ ${e.message}`},{quoted:msg}); }
-                  
-  });
+
 }
 
 async function startAll(){
