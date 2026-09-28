@@ -1,16 +1,4 @@
-<<<<<<< HEAD
-
-require('dotenv').config();
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, downloadContentFromMessage } = require('@whiskeysockets/baileys');
-const fs = require('fs');
-const path = require('path');
-const P = require('pino');
-const readline = require('readline');
-const express = require('express');
-const mongoose = require('mongoose');
-=======
 require("dotenv").config();
->>>>>>> fdabdd6 (Update main.js)
 
 const {
   default: makeWASocket,
