@@ -975,30 +975,41 @@ async function startBotForUser(
     ===================================================== */
 
     sock.ev.on(
-      "messages.upsert",
-      async ({
-        messages
-      }) => {
-        /*
-         * IMPORTANT:
-         * Process ALL messages instead of only messages[0].
-         */
-        for (const msg of messages) {
-          try {
-            await handleMessage(
-              sock,
-              msg,
-              authPath
-            );
-          } catch (e) {
-            console.log(
-              "[MESSAGE ERROR]",
-              e.message
-            );
-          }
-        }
-      }
+  "messages.upsert",
+  async ({
+    messages,
+    type
+  }) => {
+
+    console.log(
+      `[UPSERT] type=${type} count=${messages?.length || 0}`
     );
+
+    for (const msg of messages || []) {
+
+      console.log(
+        `[UPSERT MESSAGE] jid=${msg?.key?.remoteJid} fromMe=${msg?.key?.fromMe} id=${msg?.key?.id}`
+      );
+
+      try {
+
+        await handleMessage(
+          sock,
+          msg,
+          authPath
+        );
+
+      } catch (e) {
+
+        console.log(
+          "[MESSAGE ERROR]",
+          e.message
+        );
+
+      }
+    }
+  }
+);
 
   } catch (e) {
     startingBots.delete(
