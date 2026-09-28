@@ -1,10 +1,17 @@
+// ============================================================
+// ETIAS-MINI-BOT
+// FULL MAIN.JS
+// 440 DISCONNECT + SELF-CHAT + MULTI-SESSION FIX
+// 30-DAY SESSION EXPIRY
+// ============================================================
+
 require("dotenv").config();
 
 const {
-  default: makeWASocket,
-  useMultiFileAuthState,
-  DisconnectReason,
-  downloadContentFromMessage
+    default: makeWASocket,
+    useMultiFileAuthState,
+    DisconnectReason,
+    downloadContentFromMessage
 } = require("@whiskeysockets/baileys");
 
 const fs = require("fs");
@@ -14,3137 +21,2637 @@ const readline = require("readline");
 const express = require("express");
 const mongoose = require("mongoose");
 
-/* =========================================================
-   ERROR HANDLING
-========================================================= */
+// ============================================================
+// GLOBAL ERROR HANDLING
+// ============================================================
 
 process.on("uncaughtException", (err) => {
-  const message = err?.message || "";
+    const msg = err?.message || "";
 
-  if (
-    message.includes("Session") ||
-    message.includes("MAC") ||
-    message.includes("Bad MAC") ||
-    message.includes("decrypt") ||
-    message.includes("Connection Closed") ||
-    message.includes("Precondition")
-  ) {
-    return;
-  }
+    if (
+        msg.includes("Session") ||
+        msg.includes("MAC") ||
+        msg.includes("decrypt") ||
+        msg.includes("Closing open session")
+    ) {
+        console.log("[IGNORED ERROR]", msg);
+        return;
+    }
 
-  console.error("[UNCAUGHT EXCEPTION]", err);
+    console.error("[UNCAUGHT EXCEPTION]", err);
 });
 
 process.on("unhandledRejection", (err) => {
-  const message = err?.message || "";
+    const msg = err?.message || "";
 
-  if (
-    message.includes("Session") ||
-    message.includes("MAC") ||
-    message.includes("Bad MAC")
-  ) {
-    return;
-  }
+    if (
+        msg.includes("Session") ||
+        msg.includes("MAC") ||
+        msg.includes("decrypt") ||
+        msg.includes("Connection Closed")
+    ) {
+        console.log("[IGNORED REJECTION]", msg);
+        return;
+    }
 
-  console.error("[UNHANDLED REJECTION]", err);
+    console.error("[UNHANDLED REJECTION]", err);
 });
 
-/* =========================================================
-   CONFIG
-========================================================= */
+// ============================================================
+// CONFIG
+// ============================================================
 
-const BOT_NAME = "ETIAS-MINI-BOT";
+const BOT_NAME = "*ETIAS-MINI-BOT*";
 const PREFIX = ".";
 
 const OWNER_NUMBER = (
-  process.env.OWNER_NUMBER || "263778810589"
+    process.env.OWNER_NUMBER || "263778810589"
 ).replace(/[^0-9]/g, "");
 
-const ADMIN_KEY = process.env.ADMIN_KEY || OWNER_NUMBER;
-
 const MONGODB_URI =
-  process.env.MONGODB_URI ||
-  process.env.MONGO_URL;
+    process.env.MONGODB_URI ||
+    process.env.MONGO_URL ||
+    "";
 
 const PAIRING_SITE =
-  "https://etias-mini-bot-pair.onrender.com/";
+    process.env.PAIRING_SITE ||
+    "https://etias-mini-bot-pair.onrender.com/";
 
-const DEFAULT_EXPIRE_DAYS =
-  parseInt(process.env.EXPIRE_DAYS) || 30;
+const SESSION_DAYS = 30;
 
-/* =========================================================
-   PATHS
-========================================================= */
+const SESSION_DURATION =
+    SESSION_DAYS *
+    24 *
+    60 *
+    60 *
+    1000;
+
+// ============================================================
+// PATHS
+// ============================================================
 
 const dataPath = path.join(__dirname, "data");
 const authBasePath = path.join(__dirname, "auth");
 const usersPath = path.join(authBasePath, "users");
 
-[dataPath, authBasePath, usersPath].forEach((p) => {
-  if (!fs.existsSync(p)) {
-    fs.mkdirSync(p, { recursive: true });
-  }
+[
+    dataPath,
+    authBasePath,
+    usersPath
+].forEach((dir) => {
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+    }
 });
 
-/* =========================================================
-   BOT MODE
-========================================================= */
+// ============================================================
+// BOT MODE
+// ============================================================
 
 let botMode = process.env.MODE || "public";
 
 try {
-  const modeFile = path.join(dataPath, "mode.json");
+    const modeFile = path.join(dataPath, "mode.json");
 
-  if (fs.existsSync(modeFile)) {
-    const modeData = JSON.parse(
-      fs.readFileSync(modeFile, "utf8")
-    );
+    if (fs.existsSync(modeFile)) {
+        const modeData = JSON.parse(
+            fs.readFileSync(modeFile, "utf8")
+        );
 
-    botMode = modeData.mode || botMode;
-  }
-} catch (e) {
-  console.log("[MODE] Using default mode");
-}
+        if (modeData.mode) {
+            botMode = modeData.mode;
+        }
+    }
+} catch (e) {}
 
 global.botMode = botMode;
 
-/* =========================================================
-   MONGODB
-========================================================= */
+console.log(`[MODE] ${botMode.toUpperCase()}`);
+
+// ============================================================
+// MONGODB
+// ============================================================
 
 const sessionSchema = new mongoose.Schema({
-  userId: {
-    type: String,
-    unique: true
-  },
+    userId: {
+        type: String,
+        unique: true,
+        index: true
+    },
 
-  sessionId: String,
+    sessionId: {
+        type: String
+    },
 
-  phone: String,
+    phone: {
+        type: String
+    },
 
-  connected: {
-    type: Boolean,
-    default: true
-  },
+    connected: {
+        type: Boolean,
+        default: false
+    },
 
-  createdAt: {
-    type: Date,
-    default: Date.now
-  },
+    createdAt: {
+        type: Date,
+        default: Date.now
+    },
 
-  expireAt: {
-    type: Date,
-    default: () =>
-      new Date(
-        Date.now() +
-        DEFAULT_EXPIRE_DAYS * 86400000
-      )
-  },
+    lastConnectedAt: {
+        type: Date,
+        default: null
+    },
 
-  days: {
-    type: Number,
-    default: DEFAULT_EXPIRE_DAYS
-  }
+    expiresAt: {
+        type: Date,
+        default: null,
+        index: true
+    }
 });
 
-sessionSchema.index(
-  { expireAt: 1 },
-  { expireAfterSeconds: 0 }
-);
-
 const SessionModel =
-  mongoose.models.Session ||
-  mongoose.model("Session", sessionSchema);
+    mongoose.models.Session ||
+    mongoose.model("Session", sessionSchema);
+
+// ============================================================
+// MONGODB CONNECT
+// ============================================================
 
 async function connectMongo() {
-  if (!MONGODB_URI) {
-    console.log("[MONGO] No MongoDB URI configured");
-    return false;
-  }
+    if (!MONGODB_URI) {
+        console.log(
+            "[MONGO] No MONGODB_URI - using local storage"
+        );
 
-  try {
-    if (mongoose.connection.readyState === 0) {
-      await mongoose.connect(MONGODB_URI);
+        return false;
     }
 
-    console.log("[MONGO] ✅ Connected");
+    try {
+        if (mongoose.connection.readyState === 1) {
+            console.log("[MONGO] Already connected");
+            return true;
+        }
 
-    return true;
-  } catch (e) {
-    console.log("[MONGO] ❌", e.message);
-    return false;
-  }
+        await mongoose.connect(MONGODB_URI);
+
+        console.log("[MONGO] ✅ Connected");
+
+        return true;
+
+    } catch (error) {
+        console.log(
+            "[MONGO] ❌",
+            error.message
+        );
+
+        return false;
+    }
 }
 
-async function saveToMongo(
-  userId,
-  sessionId,
-  days = DEFAULT_EXPIRE_DAYS
-) {
-  if (mongoose.connection.readyState !== 1) {
-    return;
-  }
+// ============================================================
+// SESSION EXPIRY
+// ============================================================
 
-  const expireAt = new Date(
-    Date.now() + days * 86400000
-  );
+function isExpired(date) {
+    if (!date) return false;
 
-  try {
-    await SessionModel.findOneAndUpdate(
-      { userId },
-      {
-        sessionId,
-        phone: userId,
-        connected: true,
-        expireAt,
-        days
-      },
-      {
-        upsert: true,
-        new: true
-      }
-    );
-
-    console.log(
-      `[MONGO] Saved ${userId} - ${days} days`
-    );
-  } catch (e) {
-    console.log(
-      "[MONGO SAVE ERROR]",
-      e.message
-    );
-  }
+    return new Date(date).getTime() <= Date.now();
 }
+
+// ============================================================
+// SAVE SESSION
+//
+// IMPORTANT:
+// Existing valid session keeps its original expiry.
+// New session receives 30 days.
+// ============================================================
+
+async function saveToMongo(userId, sessionId) {
+    if (mongoose.connection.readyState !== 1) {
+        return;
+    }
+
+    try {
+        const existing =
+            await SessionModel.findOne({
+                userId
+            });
+
+        let expiresAt;
+
+        if (
+            existing &&
+            existing.expiresAt &&
+            !isExpired(existing.expiresAt)
+        ) {
+            expiresAt = existing.expiresAt;
+        } else {
+            expiresAt = new Date(
+                Date.now() + SESSION_DURATION
+            );
+        }
+
+        await SessionModel.findOneAndUpdate(
+            { userId },
+            {
+                sessionId,
+                phone: userId,
+                connected: true,
+                lastConnectedAt: new Date(),
+                expiresAt
+            },
+            {
+                upsert: true,
+                new: true
+            }
+        );
+
+        const remaining =
+            expiresAt.getTime() - Date.now();
+
+        const remainingDays =
+            Math.max(
+                0,
+                Math.ceil(
+                    remaining /
+                    (24 * 60 * 60 * 1000)
+                )
+            );
+
+        console.log(
+            `[MONGO] Saved ${userId} - ${remainingDays} days remaining`
+        );
+
+    } catch (error) {
+        console.log(
+            "[MONGO SAVE]",
+            error.message
+        );
+    }
+}
+
+// ============================================================
+// LOAD SESSIONS
+// REMOVE EXPIRED SESSIONS
+// ============================================================
 
 async function getFromMongo() {
-  if (mongoose.connection.readyState !== 1) {
-    return null;
-  }
-
-  try {
-    const all = await SessionModel.find({});
-    const obj = {};
-
-    all.forEach((s) => {
-      if (
-        new Date(s.expireAt) >
-        new Date()
-      ) {
-        obj[s.userId] = s.sessionId;
-      }
-    });
-
-    return obj;
-  } catch (e) {
-    console.log(
-      "[MONGO LOAD ERROR]",
-      e.message
-    );
-
-    return {};
-  }
-}
-
-/* =========================================================
-   COMMAND LOADER
-========================================================= */
-
-const commands = new Map();
-
-const cmdPath = path.join(
-  __dirname,
-  "commands"
-);
-
-if (fs.existsSync(cmdPath)) {
-  const files = fs
-    .readdirSync(cmdPath)
-    .filter((f) => f.endsWith(".js"));
-
-  for (const file of files) {
-    try {
-      const fullPath = path.join(
-        cmdPath,
-        file
-      );
-
-      delete require.cache[
-        require.resolve(fullPath)
-      ];
-
-      const cmd = require(fullPath);
-
-      const name = (
-        cmd.name ||
-        file.replace(".js", "")
-      ).toLowerCase();
-
-      commands.set(name, cmd);
-
-      if (Array.isArray(cmd.aliases)) {
-        cmd.aliases.forEach((alias) => {
-          commands.set(
-            alias.toLowerCase(),
-            cmd
-          );
-        });
-      }
-
-      console.log(
-        `[COMMAND] Loaded .${name}`
-      );
-    } catch (e) {
-      console.log(
-        `[COMMAND ERROR] ${file}:`,
-        e.message
-      );
-    }
-  }
-}
-
-console.log(
-  `[COMMANDS] ${commands.size} commands loaded`
-);
-
-/* =========================================================
-   JSON DATABASE
-========================================================= */
-
-function getDB(file, def = {}) {
-  const filePath = path.join(
-    dataPath,
-    file
-  );
-
-  if (!fs.existsSync(filePath)) {
-    fs.writeFileSync(
-      filePath,
-      JSON.stringify(def, null, 2)
-    );
-  }
-
-  try {
-    return JSON.parse(
-      fs.readFileSync(filePath, "utf8")
-    );
-  } catch (e) {
-    return def;
-  }
-}
-
-function saveDB(file, data) {
-  fs.writeFileSync(
-    path.join(dataPath, file),
-    JSON.stringify(data, null, 2)
-  );
-}
-
-function getMultiDB() {
-  return getDB(
-    "multi_sessions.json",
-    {}
-  );
-}
-
-function saveMultiSession(
-  userId,
-  sessionId,
-  days = DEFAULT_EXPIRE_DAYS
-) {
-  const db = getMultiDB();
-
-  db[userId] = sessionId;
-
-  saveDB(
-    "multi_sessions.json",
-    db
-  );
-
-  saveToMongo(
-    userId,
-    sessionId,
-    days
-  );
-}
-
-/* =========================================================
-   SESSION HELPERS
-========================================================= */
-
-function initSessionFromString(
-  sid,
-  destPath
-) {
-  if (!sid) return false;
-
-  try {
-    const credsPath = path.join(
-      destPath,
-      "creds.json"
-    );
-
-    if (
-      fs.existsSync(credsPath) &&
-      fs.statSync(credsPath).size > 500
-    ) {
-      return true;
+    if (mongoose.connection.readyState !== 1) {
+        return {};
     }
 
-    let session = sid
-      .trim()
-      .replace(/\s/g, "");
+    const sessions =
+        await SessionModel.find({});
 
-    if (session.includes("~")) {
-      session =
-        session.split("~").pop();
-    }
+    const result = {};
 
-    const decoded = Buffer.from(
-      session,
-      "base64"
-    ).toString("utf8");
+    for (const session of sessions) {
 
-    if (!decoded.startsWith("{")) {
-      return false;
-    }
+        if (
+            session.expiresAt &&
+            isExpired(session.expiresAt)
+        ) {
 
-    if (!fs.existsSync(destPath)) {
-      fs.mkdirSync(destPath, {
-        recursive: true
-      });
-    }
-
-    fs.writeFileSync(
-      credsPath,
-      decoded
-    );
-
-    return true;
-  } catch (e) {
-    console.log(
-      "[SESSION INIT ERROR]",
-      e.message
-    );
-
-    return false;
-  }
-}
-
-function askNumber() {
-  const rl =
-    readline.createInterface({
-      input: process.stdin,
-      output: process.stdout
-    });
-
-  return new Promise((resolve) => {
-    rl.question(
-      "📱 Number: ",
-      (answer) => {
-        rl.close();
-
-        resolve(
-          answer.trim() ||
-          OWNER_NUMBER
-        );
-      }
-    );
-  });
-}
-
-/* =========================================================
-   GLOBAL BOT STATE
-========================================================= */
-
-const msgCache = new Map();
-
-const activeBots = new Map();
-
-const alreadySent = new Set();
-
-const startingBots = new Set();
-
-/* =========================================================
-   SEND SESSION ONCE
-========================================================= */
-
-async function sendSessionDM(
-  sock,
-  authPath
-) {
-  try {
-    const myNumber =
-      sock.user?.id
-        ?.split(":")[0]
-        ?.replace(/[^0-9]/g, "");
-
-    if (!myNumber) return;
-
-    if (alreadySent.has(myNumber)) {
-      return;
-    }
-
-    const lockFile = path.join(
-      dataPath,
-      `sent_${myNumber}.lock`
-    );
-
-    if (
-      fs.existsSync(lockFile) &&
-      Date.now() -
-        fs.statSync(lockFile).mtimeMs <
-        12 * 60 * 60 * 1000
-    ) {
-      alreadySent.add(myNumber);
-      return;
-    }
-
-    await new Promise((resolve) =>
-      setTimeout(resolve, 12000)
-    );
-
-    const credsPath = path.join(
-      authPath,
-      "creds.json"
-    );
-
-    if (!fs.existsSync(credsPath)) {
-      return;
-    }
-
-    const creds =
-      fs.readFileSync(
-        credsPath,
-        "utf8"
-      );
-
-    const full =
-      `ETIAS-MINI-BOT~${Buffer.from(
-        creds
-      ).toString("base64")}`;
-
-    const userMsg =
-      `✅ *${BOT_NAME} CONNECTED!*\n\n` +
-      `📱 Number: ${myNumber}\n` +
-      `⏰ Package: ${DEFAULT_EXPIRE_DAYS} days\n\n` +
-      `🔑 *YOUR SESSION ID:*\n` +
-      `${full}\n\n` +
-      `👉 *NEXT STEP:*\n` +
-      `Copy this entire Session and send it to Owner:\n\n` +
-      `wa.me/${OWNER_NUMBER}?text=Hi%20Owner%20here%20is%20my%20session:%20${encodeURIComponent(
-        full
-      )}\n\n` +
-      `Owner will deploy it and your bot will be online 24/7.`;
-
-    await sock.sendMessage(
-      sock.user.id,
-      {
-        text: userMsg
-      }
-    );
-
-    fs.writeFileSync(
-      lockFile,
-      "sent"
-    );
-
-    alreadySent.add(myNumber);
-
-    console.log(
-      `[SESSION SENT] ${myNumber}`
-    );
-  } catch (e) {
-    console.log(
-      "[SESSION DM ERROR]",
-      e.message
-    );
-  }
-}
-
-/* =========================================================
-   START BOT FOR USER
-========================================================= */
-
-async function startBotForUser(
-  userId,
-  sessionString = null,
-  days = DEFAULT_EXPIRE_DAYS
-) {
-  if (startingBots.has(userId)) {
-    console.log(
-      `[BOT] ${userId} is already starting`
-    );
-
-    return;
-  }
-
-  startingBots.add(userId);
-
-  try {
-    const isMain =
-      userId === "main";
-
-    const authPath = isMain
-      ? authBasePath
-      : path.join(
-          usersPath,
-          userId
-        );
-
-    if (sessionString) {
-      initSessionFromString(
-        sessionString,
-        authPath
-      );
-    } else if (isMain) {
-      initSessionFromString(
-        process.env.SESSION_ID,
-        authPath
-      );
-    }
-
-    const {
-      state,
-      saveCreds
-    } =
-      await useMultiFileAuthState(
-        authPath
-      );
-
-    const sock =
-      makeWASocket({
-        auth: state,
-
-        logger: P({
-          level: "silent"
-        }),
-
-        printQRInTerminal: false,
-
-        browser: [
-          "Ubuntu",
-          "Chrome",
-          "20.0.04"
-        ],
-
-        markOnlineOnConnect: false,
-
-        syncFullHistory: false,
-
-        shouldSyncHistoryMessage: () =>
-          false,
-
-        getMessage: async () =>
-          undefined
-      });
-
-    sock.ev.on(
-      "creds.update",
-      saveCreds
-    );
-
-    /* =====================================================
-       PAIRING
-    ===================================================== */
-
-    if (
-      !sock.authState.creds.registered &&
-      isMain
-    ) {
-      let number = (
-        process.env.PAIR_NUMBER ||
-        OWNER_NUMBER
-      ).replace(/[^0-9]/g, "");
-
-      if (
-        !process.env.PORT &&
-        process.stdin.isTTY
-      ) {
-        try {
-          number = (
-            await askNumber()
-          ).replace(
-            /[^0-9]/g,
-            ""
-          );
-        } catch {}
-      }
-
-      await new Promise(
-        (resolve) =>
-          setTimeout(
-            resolve,
-            2000
-          )
-      );
-
-      if (
-        !sock.authState.creds.registered
-      ) {
-        try {
-          const code =
-            await sock.requestPairingCode(
-              number
-            );
-
-          console.log(
-            `\nPAIR CODE ${number}: ${
-              code
-                .match(/.{1,4}/g)
-                .join("-")
-            }\n`
-          );
-        } catch (e) {
-          console.log(
-            "[PAIRING ERROR]",
-            e.message
-          );
-        }
-      }
-    }
-
-    /* =====================================================
-       CONNECTION UPDATE
-    ===================================================== */
-
-    sock.ev.on(
-      "connection.update",
-      async ({
-        connection,
-        lastDisconnect
-      }) => {
-        if (connection === "open") {
-          const botNumber =
-            sock.user?.id
-              ?.split(":")[0]
-              ?.replace(
-                /[^0-9]/g,
-                "");
-
-          console.log(
-            `\n[CONNECTED] ${userId}`
-          );
-
-          console.log(
-            `[BOT NUMBER] ${botNumber}`
-          );
-
-          console.log(
-            `[OWNER NUMBER] ${OWNER_NUMBER}`
-          );
-
-          console.log(
-            `[MODE] ${global.botMode}`
-          );
-
-          activeBots.set(
-            userId,
-            sock
-          );
-
-          startingBots.delete(
-            userId
-          );
-
-          try {
-            const creds =
-              fs.readFileSync(
-                path.join(
-                  authPath,
-                  "creds.json"
-                ),
-                "utf8"
-              );
-
-            const full =
-              `ETIAS-MINI-BOT~${Buffer.from(
-                creds
-              ).toString(
-                "base64"
-              )}`;
-
-            const saveId =
-              botNumber;
-
-            if (saveId) {
-              saveMultiSession(
-                saveId,
-                full,
-                days
-              );
-
-              if (
-                !alreadySent.has(
-                  saveId
-                )
-              ) {
-                sendSessionDM(
-                  sock,
-                  authPath
-                );
-              }
-            }
-          } catch (e) {
             console.log(
-              "[SESSION SAVE ERROR]",
-              e.message
-            );
-          }
-
-          return;
-        }
-
-        if (connection === "close") {
-          activeBots.delete(
-            userId
-          );
-
-          startingBots.delete(
-            userId
-          );
-
-          const code =
-            lastDisconnect
-              ?.error
-              ?.output
-              ?.statusCode;
-
-          console.log(
-            `[DISCONNECTED] ${userId} code=${code}`
-          );
-
-          if (
-            code !==
-            DisconnectReason.loggedOut
-          ) {
-            console.log(
-              `[RECONNECT] ${userId} in 5 seconds...`
-            );
-
-            setTimeout(
-              () =>
-                startBotForUser(
-                  userId,
-                  null,
-                  days
-                ),
-              5000
-            );
-          } else {
-            console.log(
-              `[LOGGED OUT] ${userId}`
+                `[EXPIRY] Removing expired session ${session.userId}`
             );
 
             try {
-              fs.rmSync(
-                authPath,
-                {
-                  recursive: true,
-                  force: true
-                }
-              );
-            } catch {}
+                await SessionModel.deleteOne({
+                    _id: session._id
+                });
+            } catch (e) {}
 
-            if (!isMain) {
-              const db =
-                getMultiDB();
+            const localAuth =
+                session.userId === "main"
+                    ? authBasePath
+                    : path.join(
+                        usersPath,
+                        session.userId
+                    );
 
-              delete db[userId];
-
-              saveDB(
-                "multi_sessions.json",
-                db
-              );
-
-              if (
-                mongoose.connection
-                  .readyState === 1
-              ) {
-                try {
-                  await SessionModel.deleteOne(
+            try {
+                fs.rmSync(
+                    localAuth,
                     {
-                      userId
+                        recursive: true,
+                        force: true
                     }
-                  );
-                } catch {}
-              }
+                );
+            } catch (e) {}
 
-              activeBots.delete(
-                userId
-              );
-            }
-          }
+            continue;
         }
-      }
-    );
 
-    /* =====================================================
-       GROUP PARTICIPANTS
-    ===================================================== */
-
-    sock.ev.on(
-      "group-participants.update",
-      async (update) => {
-        const welcomeDB =
-          getDB(
-            "welcome.json",
-            {}
-          );
-
-        const goodbyeDB =
-          getDB(
-            "goodbye.json",
-            {}
-          );
-
-        try {
-          for (const p of update.participants) {
-            if (
-              update.action === "add" &&
-              welcomeDB[
-                update.id
-              ]?.enabled
-            ) {
-              const txt = (
-                welcomeDB[
-                  update.id
-                ].msg ||
-                `Welcome @${p.split("@")[0]}`
-              ).replace(
-                /@user/g,
-                `@${p.split("@")[0]}`
-              );
-
-              await sock.sendMessage(
-                update.id,
-                {
-                  text: txt,
-                  mentions: [p]
-                }
-              );
-            }
-
-            if (
-              update.action === "remove" &&
-              goodbyeDB[
-                update.id
-              ]?.enabled
-            ) {
-              const txt = (
-                goodbyeDB[
-                  update.id
-                ].msg ||
-                `Goodbye @${p.split("@")[0]}`
-              ).replace(
-                /@user/g,
-                `@${p.split("@")[0]}`
-              );
-
-              await sock.sendMessage(
-                update.id,
-                {
-                  text: txt,
-                  mentions: [p]
-                }
-              );
-            }
-          }
-        } catch (e) {
-          console.log(
-            "[GROUP EVENT ERROR]",
-            e.message
-          );
+        if (session.sessionId) {
+            result[session.userId] =
+                session.sessionId;
         }
-      }
-    );
-
-    /* =====================================================
-       MESSAGE HANDLER
-    ===================================================== */
-
-    sock.ev.on(
-  "messages.upsert",
-  async ({
-    messages,
-    type
-  }) => {
-
-    console.log(
-      `[UPSERT] type=${type} count=${messages?.length || 0}`
-    );
-
-    for (const msg of messages || []) {
-
-      console.log(
-        `[UPSERT MESSAGE] jid=${msg?.key?.remoteJid} fromMe=${msg?.key?.fromMe} id=${msg?.key?.id}`
-      );
-
-      try {
-
-        await handleMessage(
-          sock,
-          msg,
-          authPath
-        );
-
-      } catch (e) {
-
-        console.log(
-          "[MESSAGE ERROR]",
-          e.message
-        );
-
-      }
     }
-  }
-);
 
-  } catch (e) {
-    startingBots.delete(
-      userId
-    );
-
-    console.log(
-      `[START BOT ERROR] ${userId}:`,
-      e.message
-    );
-
-    setTimeout(
-      () =>
-        startBotForUser(
-          userId,
-          null,
-          days
-        ),
-      5000
-    );
-  }
+    return result;
 }
 
-/* =========================================================
-   MESSAGE HANDLER
-========================================================= */
+// ============================================================
+// LOCAL DATABASE HELPERS
+// ============================================================
 
-async function handleMessage(
-  sock,
-  msg,
-  authPath
-) {
-  if (!msg) return;
+function getDB(file, defaultValue = {}) {
 
-  if (!msg.message) {
-    return;
-  }
+    const filePath =
+        path.join(dataPath, file);
 
-  const jid =
-    msg.key?.remoteJid;
-
-  if (!jid) return;
-
-  if (
-    jid === "status@broadcast"
-  ) {
-    return;
-  }
-
-  /*
-   * IMPORTANT SELF-CHAT FIX
-   */
-
-  const sender =
-    msg.key.participant ||
-    msg.key.remoteJid;
-
-  const senderNum =
-    sender
-      ?.split("@")[0]
-      ?.replace(
-        /[^0-9]/g,
-        ""
-      ) || "";
-
-  const botNumber =
-    sock.user?.id
-      ?.split(":")[0]
-      ?.replace(
-        /[^0-9]/g,
-        ""
-      ) || "";
-
-  const isFromBot =
-    msg.key.fromMe === true;
-
-  const isOwner =
-    senderNum === OWNER_NUMBER ||
-    senderNum === botNumber ||
-    isFromBot;
-
-  const isSelfChat =
-    senderNum === botNumber ||
-    isFromBot;
-
-  /*
-   * DEBUG
-   */
-
-  console.log(
-    `[MESSAGE] jid=${jid} fromMe=${isFromBot} sender=${senderNum} bot=${botNumber} owner=${isOwner}`
-  );
-
-  /* =======================================================
-     CACHE MESSAGE
-  ======================================================= */
-
-  if (
-    !msg.message.protocolMessage
-  ) {
-    const type =
-      Object.keys(
-        msg.message
-      )[0];
-
-    if (
-      [
-        "conversation",
-        "extendedTextMessage",
-        "imageMessage",
-        "videoMessage"
-      ].includes(type)
-    ) {
-      const messageText =
-        msg.message
-          .conversation ||
-        msg.message
-          .extendedTextMessage
-          ?.text ||
-        msg.message
-          .imageMessage
-          ?.caption ||
-        msg.message
-          .videoMessage
-          ?.caption ||
-        `[${type}]`;
-
-      msgCache.set(
-        msg.key.id,
-        {
-          jid,
-          sender,
-          text: messageText,
-          message:
-            msg.message,
-          time: new Date()
-        }
-      );
-    }
-  }
-
-  /* =======================================================
-     ANTI DELETE
-  ======================================================= */
-
-  if (
-    msg.message.protocolMessage
-      ?.type === 0
-  ) {
-    const adDB =
-      getDB(
-        "antidelete.json",
-        {}
-      );
-
-    if (
-      adDB[jid]?.enabled ||
-      adDB.global?.enabled
-    ) {
-      const deletedKey =
-        msg.message
-          .protocolMessage
-          .key;
-
-      const cached =
-        msgCache.get(
-          deletedKey.id
+    if (!fs.existsSync(filePath)) {
+        fs.writeFileSync(
+            filePath,
+            JSON.stringify(defaultValue, null, 2)
         );
-
-      if (cached) {
-        try {
-          await sock.sendMessage(
-            jid,
-            {
-              text:
-                `*ANTI-DELETE*\n\n` +
-                `👤 @${cached.sender.split("@")[0]}\n` +
-                `📝 ${cached.text}`,
-              mentions: [
-                cached.sender
-              ]
-            }
-          );
-        } catch {}
-      }
     }
 
-    return;
-  }
-
-  if (
-    msg.message.protocolMessage
-  ) {
-    return;
-  }
-
-  /* =======================================================
-     VIEW ONCE
-  ======================================================= */
-
-  const viewOnce =
-    msg.message
-      .viewOnceMessageV2
-      ?.message ||
-    msg.message
-      .viewOnceMessage
-      ?.message;
-
-  if (
-    viewOnce &&
-    !isFromBot
-  ) {
-    const vvDB =
-      getDB(
-        "antiviewonce.json",
-        {}
-      );
-
-    if (
-      vvDB[jid]?.enabled ||
-      vvDB.global?.enabled
-    ) {
-      try {
-        const type =
-          Object.keys(
-            viewOnce
-          )[0];
-
-        const media =
-          viewOnce[type];
-
-        let buffer =
-          Buffer.alloc(0);
-
-        const stream =
-          await downloadContentFromMessage(
-            media,
-            type.replace(
-              "Message",
-              ""
+    try {
+        return JSON.parse(
+            fs.readFileSync(
+                filePath,
+                "utf8"
             )
-          );
-
-        for await (
-          const chunk of stream
-        ) {
-          buffer = Buffer.concat([
-            buffer,
-            chunk
-          ]);
-        }
-
-        if (
-          buffer.length
-        ) {
-          if (
-            type ===
-            "imageMessage"
-          ) {
-            await sock.sendMessage(
-              jid,
-              {
-                image: buffer,
-                caption:
-                  `*VIEWONCE* @${sender.split("@")[0]}`,
-                mentions: [
-                  sender
-                ]
-              },
-              {
-                quoted: msg
-              }
-            );
-          }
-
-          if (
-            type ===
-            "videoMessage"
-          ) {
-            await sock.sendMessage(
-              jid,
-              {
-                video: buffer,
-                caption:
-                  "*VIEWONCE*"
-              },
-              {
-                quoted: msg
-              }
-            );
-          }
-        }
-      } catch (e) {
-        console.log(
-          "[VIEWONCE ERROR]",
-          e.message
         );
-      }
+    } catch {
+        return defaultValue;
     }
-  }
+}
 
-  /* =======================================================
-     EXTRACT TEXT
-  ======================================================= */
+function saveDB(file, data) {
 
-  let text =
-    msg.message
-      .conversation ||
-    msg.message
-      .extendedTextMessage
-      ?.text ||
-    msg.message
-      .imageMessage
-      ?.caption ||
-    msg.message
-      .videoMessage
-      ?.caption ||
-    "";
+    fs.writeFileSync(
+        path.join(dataPath, file),
+        JSON.stringify(
+            data,
+            null,
+            2
+        )
+    );
+}
 
-  if (!text) {
-    return;
-  }
+// ============================================================
+// MULTI SESSION LOCAL STORAGE
+// ============================================================
 
-  text = text.trim();
-
-  console.log(
-    `[TEXT] ${isSelfChat ? "(SELF)" : ""} "${text}"`
-  );
-
-  /* =======================================================
-     ANTILINK
-  ======================================================= */
-
-  const isGroup =
-    jid.endsWith("@g.us");
-
-  if (
-    isGroup &&
-    !text.startsWith(PREFIX) &&
-    !isFromBot
-  ) {
-    const db =
-      getDB(
-        "antilink.json",
+function getMultiDB() {
+    return getDB(
+        "multi_sessions.json",
         {}
-      );
+    );
+}
 
-    if (
-      db[jid]?.enabled &&
-      /(https?:\/\/|chat\.whatsapp\.com)/i.test(
-        text
-      )
-    ) {
-      try {
-        const meta =
-          await sock.groupMetadata(
-            jid
-          );
+function saveMultiSession(
+    userId,
+    sessionId
+) {
 
-        const participant =
-          meta.participants.find(
-            (p) =>
-              p.id === sender
-          );
+    const db = getMultiDB();
 
-        const isAdmin =
-          participant?.admin;
+    db[userId] = sessionId;
 
-        const botId =
-          `${botNumber}@s.whatsapp.net`;
+    saveDB(
+        "multi_sessions.json",
+        db
+    );
 
-        const botParticipant =
-          meta.participants.find(
-            (p) =>
-              p.id === botId ||
-              p.id ===
-                sock.user?.id
-          );
+    saveToMongo(
+        userId,
+        sessionId
+    );
+}
 
-        const isBotAdmin =
-          botParticipant?.admin;
+// ============================================================
+// SESSION STRING RESTORE
+// ============================================================
+
+function initSessionFromString(
+    sessionString,
+    destination
+) {
+
+    if (!sessionString) {
+        return false;
+    }
+
+    try {
+
+        const credsPath =
+            path.join(
+                destination,
+                "creds.json"
+            );
 
         if (
-          !isAdmin &&
-          !isOwner &&
-          isBotAdmin
+            fs.existsSync(credsPath) &&
+            fs.statSync(credsPath).size > 500
         ) {
-          await sock.sendMessage(
-            jid,
-            {
-              delete: msg.key
+            return true;
+        }
+
+        let clean =
+            sessionString
+                .trim()
+                .replace(/\s/g, "");
+
+        if (clean.includes("~")) {
+            clean =
+                clean
+                    .split("~")
+                    .pop();
+        }
+
+        const decoded =
+            Buffer
+                .from(
+                    clean,
+                    "base64"
+                )
+                .toString("utf8");
+
+        if (
+            decoded.startsWith("{")
+        ) {
+
+            if (!fs.existsSync(destination)) {
+                fs.mkdirSync(
+                    destination,
+                    {
+                        recursive: true
+                    }
+                );
             }
-          );
+
+            fs.writeFileSync(
+                credsPath,
+                decoded
+            );
+
+            console.log(
+                `[SESSION] Restored ${path.basename(destination)}`
+            );
+
+            return true;
         }
-      } catch {}
-    }
-  }
 
-  /* =======================================================
-     SESSION MESSAGE
-  ======================================================= */
+    } catch (error) {
 
-  if (
-    isOwner &&
-    text.includes(
-      "ETIAS-MINI-BOT~"
-    ) &&
-    text.length > 100 &&
-    !text.startsWith(PREFIX) &&
-    !isFromBot
-  ) {
-    const match =
-      text.match(
-        /ETIAS-MINI-BOT~[A-Za-z0-9+/=]+/
-      );
-
-    if (match) {
-      const sid =
-        match[0];
-
-      try {
-        const b64 =
-          sid
-            .split("~")
-            .pop();
-
-        const sessionJSON =
-          JSON.parse(
-            Buffer.from(
-              b64,
-              "base64"
-            ).toString()
-          );
-
-        const uid =
-          sessionJSON.me
-            ?.id
-            ?.split(":")[0] ||
-          senderNum;
-
-        await sock.sendMessage(
-          jid,
-          {
-            text:
-              `🔍 Session from ${uid}\n\n` +
-              `Go to deploy panel:\n` +
-              `/admin?key=${ADMIN_KEY}\n\n` +
-              `Or type:\n` +
-              `.addbot ${sid} ${uid} ${DEFAULT_EXPIRE_DAYS}`
-          },
-          {
-            quoted: msg
-          }
-        );
-      } catch (e) {
         console.log(
-          "[SESSION PARSE ERROR]",
-          e.message
+            "[SESSION RESTORE]",
+            error.message
         );
-      }
     }
 
-    return;
-  }
+    return false;
+}
 
-  /* =======================================================
-     COMMAND CHECK
-  ======================================================= */
+// ============================================================
+// COMMAND LOADER
+// ============================================================
 
-  if (
-    !text.startsWith(PREFIX)
-  ) {
-    return;
-  }
+const commands = new Map();
 
-  const commandText =
-    text.slice(
-      PREFIX.length
-    ).trim();
-
-  if (!commandText) {
-    return;
-  }
-
-  const parts =
-    commandText.split(
-      /\s+/
+const commandsPath =
+    path.join(
+        __dirname,
+        "commands"
     );
 
-  const cmdName =
-    parts
-      .shift()
-      .toLowerCase();
+if (fs.existsSync(commandsPath)) {
 
-  const args = parts;
-
-  console.log(
-    `[COMMAND] .${cmdName} args=${JSON.stringify(args)} self=${isSelfChat}`
-  );
-
-  /* =======================================================
-     WELCOME
-  ======================================================= */
-
-  if (
-    cmdName === "welcome" &&
-    isGroup
-  ) {
-    const db =
-      getDB(
-        "welcome.json",
-        {}
-      );
-
-    if (
-      args[0] === "on"
-    ) {
-      db[jid] = {
-        enabled: true,
-        msg:
-          args
-            .slice(1)
-            .join(" ") ||
-          null
-      };
-
-      saveDB(
-        "welcome.json",
-        db
-      );
-
-      return await sock.sendMessage(
-        jid,
-        {
-          text:
-            "✅ Welcome ON"
-        },
-        {
-          quoted: msg
-        }
-      );
-    }
-
-    if (
-      args[0] === "off"
-    ) {
-      delete db[jid];
-
-      saveDB(
-        "welcome.json",
-        db
-      );
-
-      return await sock.sendMessage(
-        jid,
-        {
-          text:
-            "❌ Welcome OFF"
-        },
-        {
-          quoted: msg
-        }
-      );
-    }
-  }
-
-  /* =======================================================
-     GOODBYE
-  ======================================================= */
-
-  if (
-    cmdName === "goodbye" &&
-    isGroup
-  ) {
-    const db =
-      getDB(
-        "goodbye.json",
-        {}
-      );
-
-    if (
-      args[0] === "on"
-    ) {
-      db[jid] = {
-        enabled: true
-      };
-
-      saveDB(
-        "goodbye.json",
-        db
-      );
-
-      return await sock.sendMessage(
-        jid,
-        {
-          text:
-            "✅ Goodbye ON"
-        },
-        {
-          quoted: msg
-        }
-      );
-    }
-
-    if (
-      args[0] === "off"
-    ) {
-      delete db[jid];
-
-      saveDB(
-        "goodbye.json",
-        db
-      );
-
-      return await sock.sendMessage(
-        jid,
-        {
-          text:
-            "❌ Goodbye OFF"
-        },
-        {
-          quoted: msg
-        }
-      );
-    }
-  }
-
-  /* =======================================================
-     ANTILINK
-  ======================================================= */
-
-  if (
-    cmdName === "antilink" &&
-    isGroup
-  ) {
-    const db =
-      getDB(
-        "antilink.json",
-        {}
-      );
-
-    if (
-      args[0] === "on"
-    ) {
-      db[jid] = {
-        enabled: true
-      };
-
-      saveDB(
-        "antilink.json",
-        db
-      );
-
-      return await sock.sendMessage(
-        jid,
-        {
-          text:
-            "✅ AntiLink ON"
-        },
-        {
-          quoted: msg
-        }
-      );
-    }
-
-    if (
-      args[0] === "off"
-    ) {
-      delete db[jid];
-
-      saveDB(
-        "antilink.json",
-        db
-      );
-
-      return await sock.sendMessage(
-        jid,
-        {
-          text:
-            "❌ AntiLink OFF"
-        },
-        {
-          quoted: msg
-        }
-      );
-    }
-  }
-
-  /* =======================================================
-     ANTIDELETE
-  ======================================================= */
-
-  if (
-    cmdName ===
-    "antidelete"
-  ) {
-    const db =
-      getDB(
-        "antidelete.json",
-        {}
-      );
-
-    if (
-      args[0] === "on"
-    ) {
-      db[jid] = {
-        enabled: true
-      };
-
-      saveDB(
-        "antidelete.json",
-        db
-      );
-
-      return await sock.sendMessage(
-        jid,
-        {
-          text:
-            "✅ AntiDelete ON"
-        },
-        {
-          quoted: msg
-        }
-      );
-    }
-
-    if (
-      args[0] === "off"
-    ) {
-      delete db[jid];
-
-      saveDB(
-        "antidelete.json",
-        db
-      );
-
-      return await sock.sendMessage(
-        jid,
-        {
-          text:
-            "❌ AntiDelete OFF"
-        },
-        {
-          quoted: msg
-        }
-      );
-    }
-  }
-
-  /* =======================================================
-     ANTIVIEWONCE
-  ======================================================= */
-
-  if (
-    cmdName ===
-      "antiviewonce" ||
-    cmdName === "viewonce"
-  ) {
-    const db =
-      getDB(
-        "antiviewonce.json",
-        {}
-      );
-
-    if (
-      args[0] === "on"
-    ) {
-      db[jid] = {
-        enabled: true
-      };
-
-      saveDB(
-        "antiviewonce.json",
-        db
-      );
-
-      return await sock.sendMessage(
-        jid,
-        {
-          text:
-            "✅ AntiViewOnce ON"
-        },
-        {
-          quoted: msg
-        }
-      );
-    }
-
-    if (
-      args[0] === "off"
-    ) {
-      delete db[jid];
-
-      saveDB(
-        "antiviewonce.json",
-        db
-      );
-
-      return await sock.sendMessage(
-        jid,
-        {
-          text:
-            "❌ AntiViewOnce OFF"
-        },
-        {
-          quoted: msg
-        }
-      );
-    }
-  }
-
-  /* =======================================================
-     MODE
-  ======================================================= */
-
-  if (
-    cmdName === "mode"
-  ) {
-    if (!isOwner) {
-      return;
-    }
-
-    const newMode =
-      args[0] || "public";
-
-    if (
-      !["public", "private"].includes(
-        newMode
-      )
-    ) {
-      return await sock.sendMessage(
-        jid,
-        {
-          text:
-            "❌ Use:\n.mode public\n.mode private"
-        },
-        {
-          quoted: msg
-        }
-      );
-    }
-
-    global.botMode =
-      newMode;
-
-    saveDB(
-      "mode.json",
-      {
-        mode: newMode
-      }
-    );
-
-    return await sock.sendMessage(
-      jid,
-      {
-        text:
-          `✅ Bot mode: ${newMode}`
-      },
-      {
-        quoted: msg
-      }
-    );
-  }
-
-  /* =======================================================
-     ADDBOT
-  ======================================================= */
-
-  if (
-    cmdName === "addbot" &&
-    isOwner
-  ) {
-    const sid =
-      args[0];
-
-    const num =
-      (
-        args[1] || ""
-      ).replace(
-        /[^0-9]/g,
-        ""
-      );
-
-    const d =
-      parseInt(
-        args[2]
-      ) ||
-      DEFAULT_EXPIRE_DAYS;
-
-    if (!sid) {
-      return await sock.sendMessage(
-        jid,
-        {
-          text:
-            "Usage:\n.addbot ETIAS-MINI-BOT~xxx number days"
-        },
-        {
-          quoted: msg
-        }
-      );
-    }
-
-    try {
-      const b64 =
-        sid
-          .split("~")
-          .pop();
-
-      const sessionJSON =
-        JSON.parse(
-          Buffer.from(
-            b64,
-            "base64"
-          ).toString()
+    const commandFiles =
+        fs.readdirSync(
+            commandsPath
+        )
+        .filter(
+            file =>
+                file.endsWith(".js")
         );
 
-      const uid =
-        sessionJSON.me
-          ?.id
-          ?.split(":")[0] ||
-        num;
+    for (const file of commandFiles) {
 
-      saveMultiSession(
-        uid,
-        sid,
-        d
-      );
+        try {
 
-      await startBotForUser(
-        uid,
-        sid,
-        d
-      );
+            const fullPath =
+                path.join(
+                    commandsPath,
+                    file
+                );
 
-      return await sock.sendMessage(
-        jid,
-        {
-          text:
-            `✅ Deploying ${uid} for ${d} days\n\n` +
-            `Until ${new Date(
-              Date.now() +
-              d * 86400000
-            ).toDateString()}\n\n` +
-            `Bot will be online shortly.`
-        },
-        {
-          quoted: msg
+            delete require.cache[
+                require.resolve(fullPath)
+            ];
+
+            const command =
+                require(fullPath);
+
+            const commandName =
+                (
+                    command.name ||
+                    file.replace(
+                        ".js",
+                        ""
+                    )
+                ).toLowerCase();
+
+            commands.set(
+                commandName,
+                command
+            );
+
+            if (
+                Array.isArray(
+                    command.aliases
+                )
+            ) {
+
+                for (
+                    const alias
+                    of command.aliases
+                ) {
+
+                    commands.set(
+                        alias.toLowerCase(),
+                        command
+                    );
+                }
+            }
+
+        } catch (error) {
+
+            console.log(
+                `[COMMAND ERROR] ${file}:`,
+                error.message
+            );
         }
-      );
-    } catch (e) {
-      return await sock.sendMessage(
-        jid,
-        {
-          text:
-            `❌ ${e.message}`
-        },
-        {
-          quoted: msg
-        }
-      );
     }
-  }
+}
 
-  /* =======================================================
-     REMOVE BOT
-  ======================================================= */
+console.log(
+    `[COMMANDS] ${commands.size} commands loaded`
+);
 
-  if (
-    (
-      cmdName ===
-        "removebot" ||
-      cmdName ===
-        "delbot"
-    ) &&
-    isOwner
-  ) {
-    const target =
-      (
-        args[0] || ""
-      ).replace(
-        /[^0-9]/g,
-        ""
-      );
+// ============================================================
+// BOT STATE
+// ============================================================
 
-    if (!target) {
-      return await sock.sendMessage(
-        jid,
-        {
-          text:
-            "Usage:\n.removebot 2637xxxxxxx"
-        },
-        {
-          quoted: msg
+// Current live socket for each account
+const activeBots = new Map();
+
+// Prevent two simultaneous start operations
+const startingBots = new Map();
+
+// Reconnect timers
+const reconnectTimers = new Map();
+
+// 440 tracking
+const disconnect440History = new Map();
+
+// Accounts intentionally stopped
+const stoppedBots = new Set();
+
+// ============================================================
+// ASK NUMBER
+// ============================================================
+
+function askNumber() {
+
+    const rl =
+        readline.createInterface({
+            input: process.stdin,
+            output: process.stdout
+        });
+
+    return new Promise(
+        resolve => {
+
+            rl.question(
+                "📱 Enter number: ",
+                answer => {
+
+                    rl.close();
+
+                    resolve(
+                        answer.trim() ||
+                        OWNER_NUMBER
+                    );
+                }
+            );
         }
-      );
+    );
+}
+
+// ============================================================
+// NORMALIZE PHONE
+// ============================================================
+
+function normalizeNumber(value) {
+
+    if (!value) return "";
+
+    return String(value)
+        .split(":")[0]
+        .split("@")[0]
+        .replace(
+            /[^0-9]/g,
+            ""
+        );
+}
+
+// ============================================================
+// GET SENDER NUMBER
+// ============================================================
+
+function getSenderNumber(msg) {
+
+    const key =
+        msg?.key || {};
+
+    const participant =
+        key.participant;
+
+    const remoteJid =
+        key.remoteJid;
+
+    const sender =
+        participant ||
+        remoteJid ||
+        "";
+
+    return normalizeNumber(
+        sender
+    );
+}
+
+// ============================================================
+// CHECK OWNER
+//
+// IMPORTANT:
+// LID JIDs don't contain the normal
+// phone number. fromMe is therefore
+// also treated as owner.
+// ============================================================
+
+function isOwnerMessage(
+    msg,
+    userId
+) {
+
+    const key =
+        msg?.key || {};
+
+    if (key.fromMe) {
+        return true;
+    }
+
+    const senderNumber =
+        getSenderNumber(msg);
+
+    if (
+        senderNumber &&
+        senderNumber === OWNER_NUMBER
+    ) {
+        return true;
     }
 
     if (
-      mongoose.connection
-        .readyState === 1
+        userId !== "main" &&
+        senderNumber &&
+        senderNumber === normalizeNumber(userId)
     ) {
-      await SessionModel.deleteOne(
-        {
-          userId:
-            target
-        }
-      );
+        return true;
     }
 
-    const db =
-      getMultiDB();
+    return false;
+}
 
-    delete db[target];
+// ============================================================
+// SAFE MESSAGE TEXT EXTRACTION
+// ============================================================
 
-    saveDB(
-      "multi_sessions.json",
-      db
+function getMessageText(message) {
+
+    if (!message) {
+        return "";
+    }
+
+    if (
+        typeof message.conversation ===
+        "string"
+    ) {
+        return message.conversation;
+    }
+
+    if (
+        message.extendedTextMessage?.text
+    ) {
+        return message
+            .extendedTextMessage
+            .text;
+    }
+
+    if (
+        message.imageMessage?.caption
+    ) {
+        return message
+            .imageMessage
+            .caption;
+    }
+
+    if (
+        message.videoMessage?.caption
+    ) {
+        return message
+            .videoMessage
+            .caption;
+    }
+
+    if (
+        message.documentMessage?.caption
+    ) {
+        return message
+            .documentMessage
+            .caption;
+    }
+
+    return "";
+}
+
+// ============================================================
+// SCHEDULE RECONNECT
+// ============================================================
+
+function scheduleReconnect(
+    userId,
+    delay,
+    sessionString = null
+) {
+
+    if (
+        stoppedBots.has(userId)
+    ) {
+        return;
+    }
+
+    if (
+        reconnectTimers.has(userId)
+    ) {
+        return;
+    }
+
+    console.log(
+        `[RECONNECT] ${userId} in ${delay / 1000} seconds...`
     );
 
-    try {
-      fs.rmSync(
-        path.join(
-          usersPath,
-          target
-        ),
-        {
-          recursive: true,
-          force: true
-        }
-      );
+    const timer =
+        setTimeout(
+            async () => {
 
-      const lock =
-        path.join(
-          dataPath,
-          `sent_${target}.lock`
+                reconnectTimers.delete(
+                    userId
+                );
+
+                try {
+
+                    await startBotForUser(
+                        userId,
+                        sessionString
+                    );
+
+                } catch (error) {
+
+                    console.log(
+                        `[RECONNECT ERROR] ${userId}`,
+                        error.message
+                    );
+
+                    scheduleReconnect(
+                        userId,
+                        10000,
+                        sessionString
+                    );
+                }
+
+            },
+            delay
         );
 
-      if (
-        fs.existsSync(lock)
-      ) {
-        fs.unlinkSync(lock);
-      }
-    } catch {}
+    reconnectTimers.set(
+        userId,
+        timer
+    );
+}
+
+// ============================================================
+// CLEAR RECONNECT TIMER
+// ============================================================
+
+function clearReconnect(
+    userId
+) {
+
+    const timer =
+        reconnectTimers.get(
+            userId
+        );
+
+    if (timer) {
+
+        clearTimeout(timer);
+
+        reconnectTimers.delete(
+            userId
+        );
+    }
+}
+
+// ============================================================
+// STOP BOT
+// ============================================================
+
+async function stopBot(
+    userId
+) {
+
+    stoppedBots.add(
+        userId
+    );
+
+    clearReconnect(
+        userId
+    );
+
+    const sock =
+        activeBots.get(
+            userId
+        );
+
+    if (sock) {
+
+        try {
+            sock.ws?.close();
+        } catch (e) {}
+
+        try {
+            sock.end?.(
+                new Error(
+                    "Bot stopped"
+                )
+            );
+        } catch (e) {}
+    }
 
     activeBots.delete(
-      target
+        userId
     );
 
-    alreadySent.delete(
-      target
+    startingBots.delete(
+        userId
     );
-
-    return await sock.sendMessage(
-      jid,
-      {
-        text:
-          `✅ Deleted ${target}`
-      },
-      {
-        quoted: msg
-      }
-    );
-  }
-
-  /* =======================================================
-     EXTEND
-  ======================================================= */
-
-  if (
-    cmdName === "extend" &&
-    isOwner
-  ) {
-    const target =
-      (
-        args[0] || ""
-      ).replace(
-        /[^0-9]/g,
-        ""
-      );
-
-    const extraDays =
-      parseInt(
-        args[1]
-      ) || 30;
-
-    if (
-      mongoose.connection
-        .readyState === 1
-    ) {
-      const doc =
-        await SessionModel.findOne(
-          {
-            userId:
-              target
-          }
-        );
-
-      if (doc) {
-        const newExpire =
-          new Date(
-            new Date(
-              doc.expireAt
-            ).getTime() +
-            extraDays *
-              86400000
-          );
-
-        await SessionModel.updateOne(
-          {
-            userId:
-              target
-          },
-          {
-            expireAt:
-              newExpire,
-            days:
-              doc.days +
-              extraDays
-          }
-        );
-
-        return await sock.sendMessage(
-          jid,
-          {
-            text:
-              `✅ Extended ${target} +${extraDays} days\n\n` +
-              `New expiry: ${newExpire.toDateString()}`
-          },
-          {
-            quoted: msg
-          }
-        );
-      }
-    }
-
-    return await sock.sendMessage(
-      jid,
-      {
-        text:
-          "❌ Bot not found."
-      },
-      {
-        quoted: msg
-      }
-    );
-  }
-
-  /* =======================================================
-     LIST BOTS
-  ======================================================= */
-
-  if (
-    (
-      cmdName === "bots" ||
-      cmdName ===
-        "listbots"
-    ) &&
-    isOwner
-  ) {
-    if (
-      mongoose.connection
-        .readyState === 1
-    ) {
-      const all =
-        await SessionModel.find(
-          {}
-        );
-
-      let output =
-        `*ETIAS-MINI-BOT*\n` +
-        `*ACTIVE BOTS: ${all.length}*\n\n`;
-
-      for (const bot of all) {
-        const left =
-          Math.ceil(
-            (
-              new Date(
-                bot.expireAt
-              ) -
-              new Date()
-            ) /
-              86400000
-          );
-
-        output +=
-          `📱 ${bot.userId}\n` +
-          `⏳ ${left} days left\n` +
-          `📅 ${new Date(
-            bot.expireAt
-          ).toDateString()}\n\n`;
-      }
-
-      return await sock.sendMessage(
-        jid,
-        {
-          text:
-            output
-        },
-        {
-          quoted: msg
-        }
-      );
-    }
-
-    return await sock.sendMessage(
-      jid,
-      {
-        text:
-          "❌ MongoDB is not connected."
-      },
-      {
-        quoted: msg
-      }
-    );
-  }
-
-  /* =======================================================
-     SESSION
-  ======================================================= */
-
-  if (
-    cmdName === "session"
-  ) {
-    try {
-      const creds =
-        fs.readFileSync(
-          path.join(
-            authPath,
-            "creds.json"
-          ),
-          "utf8"
-        );
-
-      const session =
-        `ETIAS-MINI-BOT~${Buffer.from(
-          creds
-        ).toString(
-          "base64"
-        )}`;
-
-      return await sock.sendMessage(
-        jid,
-        {
-          text:
-            `*SESSION ID*\n\n${session}`
-        },
-        {
-          quoted: msg
-        }
-      );
-    } catch (e) {
-      return await sock.sendMessage(
-        jid,
-        {
-          text:
-            "❌ Session unavailable."
-        },
-        {
-          quoted: msg
-        }
-      );
-    }
-  }
-
-  /* =======================================================
-     PUBLIC / PRIVATE MODE
-  ======================================================= */
-
-  const currentMode =
-    global.botMode ||
-    "public";
-
-  if (
-    currentMode ===
-      "private" &&
-    !isOwner
-  ) {
-    return;
-  }
-
-  /* =======================================================
-     LOAD COMMAND
-  ======================================================= */
-
-  const command =
-    commands.get(
-      cmdName
-    );
-
-  if (!command) {
-    console.log(
-      `[COMMAND NOT FOUND] .${cmdName}`
-    );
-
-    return;
-  }
-
-  /* =======================================================
-     EXECUTE COMMAND
-  ======================================================= */
-
-  try {
-    console.log(
-      `[EXECUTING] .${cmdName} from ${isSelfChat ? "SELF" : senderNum}`
-    );
-
-    await command.execute(
-      sock,
-      msg,
-      args,
-      {
-        getDB,
-        saveDB,
-        downloadContentFromMessage,
-        isOwner,
-        isGroup,
-        isSelfChat,
-        sender,
-        senderNum,
-        botNumber
-      }
-    );
-
-    console.log(
-      `[EXECUTED] .${cmdName}`
-    );
-  } catch (e) {
-    console.log(
-      `[COMMAND ERROR] .${cmdName}`,
-      e
-    );
-
-    try {
-      await sock.sendMessage(
-        jid,
-        {
-          text:
-            `❌ ${e.message}`
-        },
-        {
-          quoted: msg
-        }
-      );
-    } catch {}
-  }
 }
 
-/* =========================================================
-   START ALL BOTS
-========================================================= */
+// ============================================================
+// START BOT
+// ============================================================
+
+async function startBotForUser(
+    userId,
+    sessionString = null
+) {
+
+    // --------------------------------------------------------
+    // IMPORTANT:
+    // NEVER start the same account twice.
+    // --------------------------------------------------------
+
+    if (
+        startingBots.has(userId)
+    ) {
+
+        console.log(
+            `[START SKIP] ${userId} is already starting`
+        );
+
+        return startingBots.get(
+            userId
+        );
+    }
+
+    const existing =
+        activeBots.get(
+            userId
+        );
+
+    if (
+        existing &&
+        existing.user
+    ) {
+
+        console.log(
+            `[START SKIP] ${userId} already has an active socket`
+        );
+
+        return existing;
+    }
+
+    stoppedBots.delete(
+        userId
+    );
+
+    const startPromise =
+        (async () => {
+
+            const isMain =
+                userId === "main";
+
+            const authPath =
+                isMain
+                    ? authBasePath
+                    : path.join(
+                        usersPath,
+                        normalizeNumber(
+                            userId
+                        )
+                    );
+
+            // ------------------------------------------------
+            // Restore session
+            // ------------------------------------------------
+
+            if (sessionString) {
+
+                initSessionFromString(
+                    sessionString,
+                    authPath
+                );
+
+            } else if (
+                isMain &&
+                process.env.SESSION_ID
+            ) {
+
+                initSessionFromString(
+                    process.env.SESSION_ID,
+                    authPath
+                );
+            }
+
+            const {
+                state,
+                saveCreds
+            } =
+                await useMultiFileAuthState(
+                    authPath
+                );
+
+            // ------------------------------------------------
+            // Create socket
+            // ------------------------------------------------
+
+            const sock =
+                makeWASocket({
+
+                    auth: state,
+
+                    logger:
+                        P({
+                            level: "silent"
+                        }),
+
+                    printQRInTerminal:
+                        false,
+
+                    browser: [
+                        "ETIAS-MINI-BOT",
+                        "Chrome",
+                        "1.0.0"
+                    ],
+
+                    markOnlineOnConnect:
+                        false,
+
+                    syncFullHistory:
+                        false,
+
+                    getMessage:
+                        async () =>
+                            undefined
+                });
+
+            // ------------------------------------------------
+            // IMPORTANT:
+            // Register socket immediately so another
+            // start operation cannot create a second one.
+            // ------------------------------------------------
+
+            activeBots.set(
+                userId,
+                sock
+            );
+
+            sock.ev.on(
+                "creds.update",
+                saveCreds
+            );
+
+            // ------------------------------------------------
+            // Pairing
+            // ------------------------------------------------
+
+            if (
+                !sock.authState.creds.registered &&
+                isMain &&
+                !process.env.PORT
+            ) {
+
+                let number =
+                    (
+                        process.env.PAIR_NUMBER ||
+                        OWNER_NUMBER
+                    ).replace(
+                        /[^0-9]/g,
+                        ""
+                    );
+
+                if (
+                    process.stdin.isTTY
+                ) {
+
+                    try {
+
+                        number =
+                            await askNumber();
+
+                        number =
+                            number.replace(
+                                /[^0-9]/g,
+                                ""
+                            );
+
+                    } catch (e) {}
+                }
+
+                await new Promise(
+                    resolve =>
+                        setTimeout(
+                            resolve,
+                            3000
+                        )
+                );
+
+                try {
+
+                    const code =
+                        await sock.requestPairingCode(
+                            number
+                        );
+
+                    console.log(
+                        "\n================================"
+                    );
+
+                    console.log(
+                        `PAIR CODE: ${code.match(/.{1,4}/g)?.join("-") || code}`
+                    );
+
+                    console.log(
+                        `NUMBER: ${number}`
+                    );
+
+                    console.log(
+                        "================================\n"
+                    );
+
+                } catch (error) {
+
+                    console.log(
+                        "[PAIRING ERROR]",
+                        error.message
+                    );
+                }
+            }
+
+            // ------------------------------------------------
+            // CONNECTION UPDATE
+            // ------------------------------------------------
+
+            sock.ev.on(
+                "connection.update",
+                async update => {
+
+                    const {
+                        connection,
+                        lastDisconnect
+                    } = update;
+
+                    // ========================================
+                    // OPEN
+                    // ========================================
+
+                    if (
+                        connection === "open"
+                    ) {
+
+                        console.log(
+                            `\n[CONNECTED] ${userId}`
+                        );
+
+                        console.log(
+                            `[BOT ID] ${sock.user?.id || "unknown"}`
+                        );
+
+                        console.log(
+                            `[OWNER] ${OWNER_NUMBER}`
+                        );
+
+                        console.log(
+                            `[MODE] ${global.botMode}`
+                        );
+
+                        // ------------------------------------
+                        // Only this socket may be active
+                        // ------------------------------------
+
+                        const current =
+                            activeBots.get(
+                                userId
+                            );
+
+                        if (
+                            current !== sock
+                        ) {
+
+                            console.log(
+                                `[STALE SOCKET] ${userId} opened but is no longer current`
+                            );
+
+                            try {
+                                sock.ws?.close();
+                            } catch (e) {}
+
+                            return;
+                        }
+
+                        // ------------------------------------
+                        // Clear reconnect state
+                        // ------------------------------------
+
+                        clearReconnect(
+                            userId
+                        );
+
+                        disconnect440History.delete(
+                            userId
+                        );
+
+                        // ------------------------------------
+                        // Save session
+                        // ------------------------------------
+
+                        try {
+
+                            const credsPath =
+                                path.join(
+                                    authPath,
+                                    "creds.json"
+                                );
+
+                            const creds =
+                                fs.readFileSync(
+                                    credsPath,
+                                    "utf8"
+                                );
+
+                            const fullSession =
+                                `ETIAS-MINI-BOT~${Buffer.from(
+                                    creds
+                                ).toString(
+                                    "base64"
+                                )}`;
+
+                            let saveId;
+
+                            if (sock.user?.id) {
+
+                                saveId =
+                                    normalizeNumber(
+                                        sock.user.id
+                                    );
+
+                            }
+
+                            if (
+                                !saveId ||
+                                saveId.length < 5
+                            ) {
+
+                                saveId =
+                                    isMain
+                                        ? OWNER_NUMBER
+                                        : normalizeNumber(
+                                            userId
+                                        );
+                            }
+
+                            saveMultiSession(
+                                saveId,
+                                fullSession
+                            );
+
+                        } catch (error) {
+
+                            console.log(
+                                "[SESSION SAVE ERROR]",
+                                error.message
+                            );
+                        }
+
+                        console.log(
+                            `[READY] ${userId}`
+                        );
+
+                        return;
+                    }
+
+                    // ========================================
+                    // CLOSE
+                    // ========================================
+
+                    if (
+                        connection === "close"
+                    ) {
+
+                        const code =
+                            lastDisconnect
+                                ?.error
+                                ?.output
+                                ?.statusCode;
+
+                        console.log(
+                            `[DISCONNECTED] ${userId} code=${code}`
+                        );
+
+                        // ------------------------------------
+                        // CRITICAL:
+                        // Ignore disconnects from old sockets.
+                        // ------------------------------------
+
+                        const current =
+                            activeBots.get(
+                                userId
+                            );
+
+                        if (
+                            current !== sock
+                        ) {
+
+                            console.log(
+                                `[STALE CLOSE] Ignoring close from old socket ${userId}`
+                            );
+
+                            return;
+                        }
+
+                        activeBots.delete(
+                            userId
+                        );
+
+                        // ------------------------------------
+                        // LOGGED OUT
+                        // ------------------------------------
+
+                        if (
+                            code ===
+                            DisconnectReason.loggedOut
+                        ) {
+
+                            console.log(
+                                `[LOGGED OUT] ${userId}`
+                            );
+
+                            clearReconnect(
+                                userId
+                            );
+
+                            stoppedBots.add(
+                                userId
+                            );
+
+                            try {
+
+                                fs.rmSync(
+                                    authPath,
+                                    {
+                                        recursive: true,
+                                        force: true
+                                    }
+                                );
+
+                            } catch (e) {}
+
+                            if (
+                                !isMain
+                            ) {
+
+                                const db =
+                                    getMultiDB();
+
+                                delete db[userId];
+
+                                saveDB(
+                                    "multi_sessions.json",
+                                    db
+                                );
+
+                                if (
+                                    mongoose.connection.readyState === 1
+                                ) {
+
+                                    try {
+
+                                        await SessionModel.deleteOne({
+                                            userId
+                                        });
+
+                                    } catch (e) {}
+                                }
+                            }
+
+                            return;
+                        }
+
+                        // ------------------------------------
+                        // CODE 440
+                        //
+                        // Connection replaced.
+                        //
+                        // Do NOT immediately reconnect forever.
+                        // ------------------------------------
+
+                        if (
+                            code ===
+                            DisconnectReason.connectionReplaced ||
+                            code === 440
+                        ) {
+
+                            const now =
+                                Date.now();
+
+                            let history =
+                                disconnect440History.get(
+                                    userId
+                                ) || [];
+
+                            history =
+                                history.filter(
+                                    timestamp =>
+                                        now - timestamp <
+                                        60000
+                                );
+
+                            history.push(
+                                now
+                            );
+
+                            disconnect440History.set(
+                                userId,
+                                history
+                            );
+
+                            console.log(
+                                `[440] ${userId}: connection replaced (${history.length}/3 in 60s)`
+                            );
+
+                            // --------------------------------
+                            // If 440 happens repeatedly,
+                            // DON'T create another competing
+                            // socket.
+                            // --------------------------------
+
+                            if (
+                                history.length >= 3
+                            ) {
+
+                                console.log(
+                                    `[440 STOP] ${userId}: repeated connection replacement detected.`
+                                );
+
+                                console.log(
+                                    `[440 STOP] Check WhatsApp Linked Devices and Render SESSION_ID.`
+                                );
+
+                                console.log(
+                                    `[440 STOP] Automatic reconnect paused for this account.`
+                                );
+
+                                stoppedBots.add(
+                                    userId
+                                );
+
+                                clearReconnect(
+                                    userId
+                                );
+
+                                return;
+                            }
+
+                            // --------------------------------
+                            // First/second 440:
+                            // one delayed reconnect.
+                            // --------------------------------
+
+                            console.log(
+                                `[440] Waiting before reconnecting ${userId}...`
+                            );
+
+                            scheduleReconnect(
+                                userId,
+                                30000,
+                                sessionString
+                            );
+
+                            return;
+                        }
+
+                        // ------------------------------------
+                        // OTHER TEMPORARY DISCONNECT
+                        // ------------------------------------
+
+                        if (
+                            !stoppedBots.has(
+                                userId
+                            )
+                        ) {
+
+                            scheduleReconnect(
+                                userId,
+                                5000,
+                                sessionString
+                            );
+                        }
+                    }
+                }
+            );
+
+            // =================================================
+            // GROUP PARTICIPANTS
+            // =================================================
+
+            sock.ev.on(
+                "group-participants.update",
+                async update => {
+
+                    const welcomeDB =
+                        getDB(
+                            "welcome.json",
+                            {}
+                        );
+
+                    const goodbyeDB =
+                        getDB(
+                            "goodbye.json",
+                            {}
+                        );
+
+                    try {
+
+                        const metadata =
+                            await sock.groupMetadata(
+                                update.id
+                            );
+
+                        for (
+                            const participant
+                            of update.participants
+                        ) {
+
+                            if (
+                                update.action ===
+                                "add" &&
+                                welcomeDB[
+                                    update.id
+                                ]?.enabled
+                            ) {
+
+                                await sock.sendMessage(
+                                    update.id,
+                                    {
+                                        text:
+                                            `Welcome @${participant.split("@")[0]}`,
+                                        mentions: [
+                                            participant
+                                        ]
+                                    }
+                                );
+                            }
+
+                            if (
+                                update.action ===
+                                "remove" &&
+                                goodbyeDB[
+                                    update.id
+                                ]?.enabled
+                            ) {
+
+                                await sock.sendMessage(
+                                    update.id,
+                                    {
+                                        text:
+                                            `Goodbye @${participant.split("@")[0]}`,
+                                        mentions: [
+                                            participant
+                                        ]
+                                    }
+                                );
+                            }
+                        }
+
+                    } catch (error) {
+
+                        console.log(
+                            "[GROUP UPDATE]",
+                            error.message
+                        );
+                    }
+                }
+            );
+
+            // =================================================
+            // MESSAGES
+            // =================================================
+
+            sock.ev.on(
+                "messages.upsert",
+                async event => {
+
+                    const messages =
+                        event?.messages || [];
+
+                    if (
+                        !messages.length
+                    ) {
+                        return;
+                    }
+
+                    console.log(
+                        `[UPSERT] type=${event.type} count=${messages.length}`
+                    );
+
+                    // ----------------------------------------
+                    // Process every message
+                    // ----------------------------------------
+
+                    for (
+                        const msg
+                        of messages
+                    ) {
+
+                        try {
+
+                            if (
+                                !msg ||
+                                !msg.message
+                            ) {
+                                continue;
+                            }
+
+                            const key =
+                                msg.key || {};
+
+                            const jid =
+                                key.remoteJid || "";
+
+                            if (!jid) {
+                                continue;
+                            }
+
+                            const isGroup =
+                                jid.endsWith(
+                                    "@g.us"
+                                );
+
+                            const fromMe =
+                                key.fromMe === true;
+
+                            const senderNumber =
+                                getSenderNumber(
+                                    msg
+                                );
+
+                            const owner =
+                                isOwnerMessage(
+                                    msg,
+                                    userId
+                                );
+
+                            // =================================
+                            // SELF CHAT / LID DIAGNOSTICS
+                            // =================================
+
+                            if (fromMe) {
+
+                                console.log(
+                                    `[SELF-CHAT] jid=${jid} user=${userId}`
+                                );
+
+                            } else {
+
+                                console.log(
+                                    `[MESSAGE] jid=${jid} fromMe=false user=${userId}`
+                                );
+                            }
+
+                            if (
+                                jid.endsWith(
+                                    "@lid"
+                                )
+                            ) {
+
+                                console.log(
+                                    `[LID] ${jid}`
+                                );
+                            }
+
+                            // =================================
+                            // TEXT
+                            // =================================
+
+                            let text =
+                                getMessageText(
+                                    msg.message
+                                );
+
+                            if (!text) {
+                                continue;
+                            }
+
+                            text =
+                                text.trim();
+
+                            console.log(
+                                `[TEXT] ${text}`
+                            );
+
+                            // =================================
+                            // ANTI-LINK
+                            // =================================
+
+                            if (
+                                isGroup &&
+                                !text.startsWith(
+                                    PREFIX
+                                ) &&
+                                !fromMe
+                            ) {
+
+                                const antiLinkDB =
+                                    getDB(
+                                        "antilink.json",
+                                        {}
+                                    );
+
+                                if (
+                                    antiLinkDB[
+                                        jid
+                                    ]?.enabled &&
+                                    /(https?:\/\/|chat\.whatsapp\.com|wa\.me|t\.me)/i.test(
+                                        text
+                                    )
+                                ) {
+
+                                    try {
+
+                                        const metadata =
+                                            await sock.groupMetadata(
+                                                jid
+                                            );
+
+                                        const participant =
+                                            metadata.participants.find(
+                                                p =>
+                                                    p.id ===
+                                                    key.participant
+                                            );
+
+                                        const isAdmin =
+                                            !!participant?.admin;
+
+                                        const botNumber =
+                                            normalizeNumber(
+                                                sock.user?.id
+                                            );
+
+                                        const botParticipant =
+                                            metadata.participants.find(
+                                                p =>
+                                                    normalizeNumber(
+                                                        p.id
+                                                    ) ===
+                                                    botNumber
+                                            );
+
+                                        const botIsAdmin =
+                                            !!botParticipant?.admin;
+
+                                        if (
+                                            !isAdmin &&
+                                            botIsAdmin
+                                        ) {
+
+                                            await sock.sendMessage(
+                                                jid,
+                                                {
+                                                    delete:
+                                                        key
+                                                }
+                                            );
+                                        }
+
+                                    } catch (error) {
+
+                                        console.log(
+                                            "[ANTILINK]",
+                                            error.message
+                                        );
+                                    }
+                                }
+                            }
+
+                            // =================================
+                            // COMMAND CHECK
+                            // =================================
+
+                            if (
+                                !text.startsWith(
+                                    PREFIX
+                                )
+                            ) {
+                                continue;
+                            }
+
+                            const withoutPrefix =
+                                text
+                                    .slice(
+                                        PREFIX.length
+                                    )
+                                    .trim();
+
+                            if (
+                                !withoutPrefix
+                            ) {
+                                continue;
+                            }
+
+                            const parts =
+                                withoutPrefix
+                                    .split(/\s+/);
+
+                            const commandName =
+                                parts
+                                    .shift()
+                                    .toLowerCase();
+
+                            const args =
+                                parts;
+
+                            console.log(
+                                `[COMMAND] ${commandName} owner=${owner} fromMe=${fromMe}`
+                            );
+
+                            // =================================
+                            // MODE COMMAND
+                            // =================================
+
+                            if (
+                                commandName ===
+                                "mode"
+                            ) {
+
+                                if (!owner) {
+                                    continue;
+                                }
+
+                                const newMode =
+                                    args[0]
+                                        ?.toLowerCase();
+
+                                const validModes = [
+                                    "public",
+                                    "private",
+                                    "groups",
+                                    "inbox"
+                                ];
+
+                                if (
+                                    !newMode ||
+                                    !validModes.includes(
+                                        newMode
+                                    )
+                                ) {
+
+                                    await sock.sendMessage(
+                                        jid,
+                                        {
+                                            text:
+                                                `Current mode: ${global.botMode}\n\nAvailable: public, private, groups, inbox`
+                                        },
+                                        {
+                                            quoted:
+                                                msg
+                                        }
+                                    );
+
+                                    continue;
+                                }
+
+                                global.botMode =
+                                    newMode;
+
+                                saveDB(
+                                    "mode.json",
+                                    {
+                                        mode:
+                                            newMode
+                                    }
+                                );
+
+                                await sock.sendMessage(
+                                    jid,
+                                    {
+                                        text:
+                                            `✅ Mode changed to ${newMode}`
+                                    },
+                                    {
+                                        quoted:
+                                            msg
+                                    }
+                                );
+
+                                continue;
+                            }
+
+                            // =================================
+                            // SESSION COMMAND
+                            // =================================
+
+                            if (
+                                commandName ===
+                                "session"
+                            ) {
+
+                                if (!owner) {
+                                    continue;
+                                }
+
+                                try {
+
+                                    const creds =
+                                        fs.readFileSync(
+                                            path.join(
+                                                authPath,
+                                                "creds.json"
+                                            ),
+                                            "utf8"
+                                        );
+
+                                    const session =
+                                        `ETIAS-MINI-BOT~${Buffer.from(
+                                            creds
+                                        ).toString(
+                                            "base64"
+                                        )}`;
+
+                                    await sock.sendMessage(
+                                        jid,
+                                        {
+                                            text:
+                                                `*ETIAS-MINI-BOT SESSION*\n\n${session}\n\nPair Site:\n${PAIRING_SITE}\n\nExpires after ${SESSION_DAYS} days.`
+                                        },
+                                        {
+                                            quoted:
+                                                msg
+                                        }
+                                    );
+
+                                } catch (error) {
+
+                                    await sock.sendMessage(
+                                        jid,
+                                        {
+                                            text:
+                                                `❌ Could not generate session: ${error.message}`
+                                        },
+                                        {
+                                            quoted:
+                                                msg
+                                        }
+                                    );
+                                }
+
+                                continue;
+                            }
+
+                            // =================================
+                            // LISTBOTS
+                            // =================================
+
+                            if (
+                                commandName ===
+                                "listbots" &&
+                                owner
+                            ) {
+
+                                const active =
+                                    Array.from(
+                                        activeBots.keys()
+                                    );
+
+                                let dbCount = 0;
+
+                                if (
+                                    mongoose.connection.readyState === 1
+                                ) {
+
+                                    dbCount =
+                                        await SessionModel.countDocuments();
+                                }
+
+                                await sock.sendMessage(
+                                    jid,
+                                    {
+                                        text:
+                                            `*ETIAS-MINI-BOT*\n\nACTIVE BOTS: ${active.length}\n\n${active.join("\n") || "None"}\n\nMongoDB Sessions: ${dbCount}\n\nPair Site:\n${PAIRING_SITE}`
+                                    },
+                                    {
+                                        quoted:
+                                            msg
+                                    }
+                                );
+
+                                continue;
+                            }
+
+                            // =================================
+                            // BOT MODE
+                            // =================================
+
+                            const currentMode =
+                                global.botMode ||
+                                "public";
+
+                            if (
+                                currentMode ===
+                                "private" &&
+                                !owner
+                            ) {
+                                continue;
+                            }
+
+                            if (
+                                currentMode ===
+                                "groups" &&
+                                !isGroup &&
+                                !owner
+                            ) {
+                                continue;
+                            }
+
+                            if (
+                                currentMode ===
+                                "inbox" &&
+                                isGroup &&
+                                !owner
+                            ) {
+                                continue;
+                            }
+
+                            // =================================
+                            // FIND COMMAND
+                            // =================================
+
+                            const command =
+                                commands.get(
+                                    commandName
+                                );
+
+                            if (!command) {
+
+                                console.log(
+                                    `[COMMAND NOT FOUND] ${commandName}`
+                                );
+
+                                continue;
+                            }
+
+                            // =================================
+                            // EXECUTE COMMAND
+                            // =================================
+
+                            console.log(
+                                `[EXECUTE] ${commandName}`
+                            );
+
+                            try {
+
+                                await command.execute(
+                                    sock,
+                                    msg,
+                                    args,
+                                    {
+                                        getDB,
+                                        saveDB,
+                                        downloadContentFromMessage,
+                                        isOwner: owner,
+                                        isGroup,
+                                        userId,
+                                        botMode:
+                                            global.botMode,
+                                        BOT_NAME,
+                                        PREFIX
+                                    }
+                                );
+
+                            } catch (error) {
+
+                                console.log(
+                                    `[COMMAND ERROR] ${commandName}`,
+                                    error
+                                );
+
+                                try {
+
+                                    await sock.sendMessage(
+                                        jid,
+                                        {
+                                            text:
+                                                `❌ ${error.message || "Command failed"}`
+                                        },
+                                        {
+                                            quoted:
+                                                msg
+                                        }
+                                    );
+
+                                } catch (sendError) {}
+                            }
+
+                        } catch (error) {
+
+                            console.log(
+                                "[MESSAGE HANDLER ERROR]",
+                                error.message
+                            );
+                        }
+                    }
+                }
+            );
+
+            return sock;
+
+        })();
+
+    startingBots.set(
+        userId,
+        startPromise
+    );
+
+    try {
+
+        return await startPromise;
+
+    } finally {
+
+        startingBots.delete(
+            userId
+        );
+    }
+}
+
+// ============================================================
+// START ALL SESSIONS
+//
+// IMPORTANT FIX:
+// If MongoDB already has sessions, DO NOT also start the
+// Render SESSION_ID automatically.
+//
+// This prevents the same WhatsApp account being opened twice.
+// ============================================================
 
 async function startAll() {
-  console.log(
-    "\n=============================="
-  );
 
-  console.log(
-    "     ETIAS-MINI-BOT"
-  );
-
-  console.log(
-    "==============================\n"
-  );
-
-  const mongoOK =
     await connectMongo();
 
-  let multiDB = {};
-
-  if (mongoOK) {
-    multiDB =
-      (await getFromMongo()) ||
-      {};
-
-    console.log(
-      `[MULTI] ${Object.keys(
-        multiDB
-      ).length} valid sessions`
-    );
-  } else {
-    multiDB =
-      getMultiDB();
-
-    console.log(
-      `[LOCAL] ${Object.keys(
-        multiDB
-      ).length} sessions`
-    );
-  }
-
-  const ids =
-    Object.keys(
-      multiDB
-    );
-
-  if (
-    ids.length === 0 &&
-    process.env.SESSION_ID
-  ) {
-    await startBotForUser(
-      "main",
-      process.env.SESSION_ID
-    );
-  } else if (
-    ids.length > 0
-  ) {
-    for (const id of ids) {
-      await startBotForUser(
-        id,
-        multiDB[id]
-      );
-
-      await new Promise(
-        (resolve) =>
-          setTimeout(
-            resolve,
-            2000
-          )
-      );
-    }
-  } else {
-    await startBotForUser(
-      "main"
-    );
-  }
-}
-
-/* =========================================================
-   EXPRESS
-========================================================= */
-
-const app =
-  express();
-
-app.use(
-  express.json()
-);
-
-app.use(
-  express.urlencoded({
-    extended: true
-  })
-);
-
-/* =========================================================
-   HOME
-========================================================= */
-
-app.get(
-  "/",
-  async (req, res) => {
-    let count = 0;
+    let multiDB = {};
 
     if (
-      mongoose.connection
-        .readyState === 1
+        mongoose.connection.readyState === 1
     ) {
-      count =
-        await SessionModel.countDocuments();
+
+        multiDB =
+            await getFromMongo();
+
+        console.log(
+            `[MULTI] ${Object.keys(multiDB).length} valid sessions`
+        );
+
     } else {
-      count =
-        Object.keys(
-          getMultiDB()
-        ).length;
+
+        multiDB =
+            getMultiDB();
+
+        console.log(
+            `[MULTI] ${Object.keys(multiDB).length} local sessions`
+        );
     }
 
-    res.send(`
+    const ids =
+        Object.keys(
+            multiDB
+        );
+
+    // ========================================================
+    // CASE 1:
+    // MongoDB/local sessions exist
+    //
+    // ONLY start those sessions.
+    // DO NOT start SESSION_ID as another socket.
+    // ========================================================
+
+    if (
+        ids.length > 0
+    ) {
+
+        for (
+            const id
+            of ids
+        ) {
+
+            console.log(
+                `[MULTI] Starting saved session ${id}`
+            );
+
+            try {
+
+                await startBotForUser(
+                    id,
+                    multiDB[id]
+                );
+
+            } catch (error) {
+
+                console.log(
+                    `[MULTI START ERROR] ${id}`,
+                    error.message
+                );
+            }
+
+            await new Promise(
+                resolve =>
+                    setTimeout(
+                        resolve,
+                        3000
+                    )
+            );
+        }
+
+        console.log(
+            "[MULTI] Saved sessions started."
+        );
+
+        return;
+    }
+
+    // ========================================================
+    // CASE 2:
+    // No MongoDB sessions
+    //
+    // Start Render SESSION_ID once.
+    // ========================================================
+
+    if (
+        process.env.SESSION_ID
+    ) {
+
+        console.log(
+            "[MAIN] Starting SESSION_ID once..."
+        );
+
+        await startBotForUser(
+            "main",
+            process.env.SESSION_ID
+        );
+
+        return;
+    }
+
+    // ========================================================
+    // CASE 3:
+    // No session at all
+    // ========================================================
+
+    console.log(
+        "[MAIN] No saved session found."
+    );
+
+    await startBotForUser(
+        "main"
+    );
+}
+
+// ============================================================
+// EXPRESS SERVER
+// ============================================================
+
+const app =
+    express();
+
+app.use(
+    express.json({
+        limit: "10mb"
+    })
+);
+
+// ============================================================
+// HOME
+// ============================================================
+
+app.get(
+    "/",
+    async (req, res) => {
+
+        let mongoCount = 0;
+
+        if (
+            mongoose.connection.readyState === 1
+        ) {
+
+            mongoCount =
+                await SessionModel.countDocuments();
+
+        } else {
+
+            mongoCount =
+                Object.keys(
+                    getMultiDB()
+                ).length;
+        }
+
+        res.send(`
 <!DOCTYPE html>
 <html>
 <head>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ETIAS MULTI</title>
+<title>ETIAS-MINI-BOT</title>
 
 <style>
+
 body{
-  background:#0a0a0a;
-  color:#fff;
-  font-family:sans-serif;
-  text-align:center;
-  padding:20px;
+    background:#080808;
+    color:#fff;
+    font-family:Arial,sans-serif;
+    text-align:center;
+    padding:30px;
 }
 
 .card{
-  background:#1a1a1a;
-  padding:20px;
-  border-radius:15px;
-  max-width:500px;
-  margin:auto;
+    max-width:500px;
+    margin:auto;
+    background:#151515;
+    padding:25px;
+    border-radius:18px;
+    box-shadow:0 0 30px rgba(0,255,136,.15);
 }
 
-a.btn{
-  display:block;
-  background:#00ff88;
-  color:#000;
-  padding:15px;
-  border-radius:10px;
-  text-decoration:none;
-  font-weight:bold;
-  margin:10px 0;
+h1{
+    color:#00ff88;
 }
+
+.btn{
+    display:block;
+    padding:15px;
+    margin:12px 0;
+    background:#00ff88;
+    color:#000;
+    text-decoration:none;
+    border-radius:10px;
+    font-weight:bold;
+}
+
+.dark{
+    background:#222;
+    color:#fff;
+}
+
+.small{
+    color:#888;
+    font-size:12px;
+}
+
 </style>
-
 </head>
 
 <body>
 
-<h1>ETIAS MULTI</h1>
-
 <div class="card">
 
+<h1>🤖 ETIAS-MINI-BOT</h1>
+
 <p>
-Active:
-${activeBots.size}/${count}
+Active Bots:
+<strong>${activeBots.size}</strong>
 </p>
 
-<a
-class="btn"
+<p>
+MongoDB Sessions:
+<strong>${mongoCount}</strong>
+</p>
+
+<p>
+Mode:
+<strong>${global.botMode}</strong>
+</p>
+
+<p>
+Session duration:
+<strong>${SESSION_DAYS} days</strong>
+</p>
+
+<a class="btn"
 href="${PAIRING_SITE}"
 target="_blank">
-🔗 PAIRING SITE
+🔗 PAIR BOT
 </a>
 
-<a
-class="btn"
-href="/admin?key=${encodeURIComponent(
-      ADMIN_KEY
-    )}"
-style="background:#fff">
-🔧 DEPLOY PANEL
+<a class="btn dark"
+href="/bots">
+📋 VIEW BOTS
 </a>
 
-<a
-class="btn"
-href="/bots"
-style="background:#333;color:#fff">
-📋 JSON
-</a>
+<p class="small">
+ETIAS TECH<br>
+Bringing AI to your fingertips
+</p>
 
 </div>
 
 </body>
 </html>
 `);
-  }
+    }
 );
 
-/* =========================================================
-   ADMIN
-========================================================= */
+// ============================================================
+// ADD SESSION
+// ============================================================
 
 app.get(
-  "/admin",
-  async (req, res) => {
-    if (
-      req.query.key !==
-      ADMIN_KEY
-    ) {
-      return res
-        .status(403)
-        .send(
-          "Forbidden"
-        );
-    }
+    "/add",
+    async (req, res) => {
 
-    const all =
-      mongoose.connection
-        .readyState === 1
-        ? await SessionModel.find(
-            {}
-          )
-        : [];
+        const session =
+            req.query.session;
 
-    const list =
-      all
-        .map((bot) => {
-          const daysLeft =
-            Math.ceil(
-              (
-                new Date(
-                  bot.expireAt
-                ) -
-                new Date()
-              ) /
-                86400000
+        if (!session) {
+
+            return res.send(`
+                Use:
+                ${PAIRING_SITE}
+
+                <br><br>
+
+                Or:
+                /add?session=ETIAS~xxx
+            `);
+        }
+
+        try {
+
+            const base64 =
+                session.includes("~")
+                    ? session
+                        .split("~")
+                        .pop()
+                    : session;
+
+            const json =
+                JSON.parse(
+                    Buffer
+                        .from(
+                            base64.trim(),
+                            "base64"
+                        )
+                        .toString(
+                            "utf8"
+                        )
+                );
+
+            const userId =
+                normalizeNumber(
+                    json?.me?.id
+                ) ||
+                `user_${Date.now()}`;
+
+            // ----------------------------------------------
+            // Prevent duplicate account
+            // ----------------------------------------------
+
+            if (
+                activeBots.has(
+                    userId
+                ) ||
+                startingBots.has(
+                    userId
+                )
+            ) {
+
+                return res.send(`
+                    ⚠️ ${userId} is already active.
+                    <br><br>
+                    <a href="/">Home</a>
+                `);
+            }
+
+            saveMultiSession(
+                userId,
+                session
             );
 
-          return `
-<tr>
-
-<td>
-${bot.userId}
-</td>
-
-<td>
-${daysLeft}d
-</td>
-
-<td>
-${new Date(
-            bot.expireAt
-          ).toDateString()}
-</td>
-
-<td>
-
-<a
-href="/admin/delete?key=${encodeURIComponent(
-            ADMIN_KEY
-          )}&id=${encodeURIComponent(
-            bot.userId
-          )}">
-Delete
-</a>
-
-</td>
-
-</tr>
-`;
-        })
-        .join("");
-
-    res.send(`
-<!DOCTYPE html>
-
-<html>
-
-<head>
-
-<meta
-name="viewport"
-content="width=device-width,initial-scale=1">
-
-<title>
-ETIAS DEPLOY PANEL
-</title>
-
-<style>
-
-body{
-background:#111;
-color:#fff;
-font-family:sans-serif;
-padding:20px;
-}
-
-.card{
-background:#1a1a1a;
-padding:20px;
-border-radius:15px;
-max-width:600px;
-margin:auto;
-}
-
-input,button{
-width:100%;
-padding:15px;
-margin:8px 0;
-border-radius:10px;
-border:0;
-box-sizing:border-box;
-}
-
-input{
-background:#222;
-color:#fff;
-}
-
-button{
-background:#00ff88;
-font-weight:bold;
-cursor:pointer;
-}
-
-table{
-width:100%;
-border-collapse:collapse;
-margin-top:20px;
-}
-
-td,th{
-border:1px solid #333;
-padding:8px;
-font-size:12px;
-}
-
-a{
-color:#00ff88;
-}
-
-</style>
-
-</head>
-
-<body>
-
-<div class="card">
-
-<h2>
-🔧 DEPLOY PANEL
-</h2>
-
-<p>
-Paste Session ID, choose duration,
-then deploy.
-</p>
-
-<form
-method="POST"
-action="/admin/add?key=${encodeURIComponent(
-      ADMIN_KEY
-    )}">
-
-<label>
-Session ID
-</label>
-
-<input
-name="session"
-placeholder="ETIAS-MINI-BOT~xxxx"
-required>
-
-<label>
-Phone Number
-</label>
-
-<input
-name="phone"
-placeholder="2637xxxxxx">
-
-<label>
-Duration
-</label>
-
-<input
-name="days"
-type="number"
-value="${DEFAULT_EXPIRE_DAYS}"
-required>
-
-<button
-type="submit">
-🚀 DEPLOY BOT
-</button>
-
-</form>
-
-<h3>
-Bots (${all.length})
-</h3>
-
-<table>
-
-<tr>
-<th>Number</th>
-<th>Left</th>
-<th>Expiry</th>
-<th>Action</th>
-</tr>
-
-${list ||
-      `<tr>
-<td colspan="4">
-No bots
-</td>
-</tr>`}
-
-</table>
-
-<br>
-
-<a href="/">
-Home
-</a>
-
-</div>
-
-</body>
-
-</html>
-`);
-  }
-);
-
-/* =========================================================
-   ADMIN ADD
-========================================================= */
-
-app.post(
-  "/admin/add",
-  async (req, res) => {
-    if (
-      req.query.key !==
-      ADMIN_KEY
-    ) {
-      return res
-        .status(403)
-        .send(
-          "Forbidden"
-        );
-    }
-
-    const sid =
-      (
-        req.body.session ||
-        ""
-      ).trim();
-
-    const days =
-      parseInt(
-        req.body.days
-      ) ||
-      DEFAULT_EXPIRE_DAYS;
-
-    const phone =
-      (
-        req.body.phone ||
-        ""
-      ).replace(
-        /[^0-9]/g,
-        ""
-      );
-
-    if (!sid) {
-      return res.send(
-        "No session"
-      );
-    }
-
-    try {
-      const b64 =
-        sid.includes("~")
-          ? sid
-              .split("~")
-              .pop()
-          : sid;
-
-      const sessionJSON =
-        JSON.parse(
-          Buffer.from(
-            b64,
-            "base64"
-          ).toString()
-        );
-
-      const userId =
-        sessionJSON.me
-          ?.id
-          ?.split(":")[0] ||
-        phone ||
-        `user_${Date.now()}`;
-
-      saveMultiSession(
-        userId,
-        sid,
-        days
-      );
-
-      await startBotForUser(
-        userId,
-        sid,
-        days
-      );
-
-      res.send(`
-<!DOCTYPE html>
-
-<html>
-
-<body
-style="
-background:#111;
-color:#fff;
-text-align:center;
-padding:50px;
-font-family:sans-serif;
-">
-
-<h1>
-✅ Deployed ${userId}
-</h1>
-
-<p>
-Duration: ${days} days
-</p>
-
-<p>
-Until:
-${new Date(
-        Date.now() +
-          days *
-            86400000
-      ).toDateString()}
-</p>
-
-<p>
-Bot is starting...
-</p>
-
-<a
-href="/admin?key=${encodeURIComponent(
-        ADMIN_KEY
-      )}"
-style="color:#00ff88">
-Back to Panel
-</a>
-
-</body>
-</html>
-`);
-    } catch (e) {
-      res.send(
-        `❌ Invalid session: ${e.message}<br><br>` +
-          `<a href="/admin?key=${encodeURIComponent(
-            ADMIN_KEY
-          )}">Back</a>`
-      );
-    }
-  }
-);
-
-/* =========================================================
-   ADMIN DELETE
-========================================================= */
-
-app.get(
-  "/admin/delete",
-  async (req, res) => {
-    if (
-      req.query.key !==
-      ADMIN_KEY
-    ) {
-      return res
-        .status(403)
-        .send(
-          "Forbidden"
-        );
-    }
-
-    const id =
-      (
-        req.query.id ||
-        ""
-      ).replace(
-        /[^0-9]/g,
-        ""
-      );
-
-    if (
-      mongoose.connection
-        .readyState === 1
-    ) {
-      await SessionModel.deleteOne(
-        {
-          userId: id
+            await startBotForUser(
+                userId,
+                session
+            );
+
+            res.send(`
+                <h2>✅ Bot Added</h2>
+
+                <p>
+                Number:
+                ${userId}
+                </p>
+
+                <p>
+                Session expires after
+                ${SESSION_DAYS} days.
+                </p>
+
+                <a href="/">Home</a>
+                <br><br>
+                <a href="${PAIRING_SITE}">
+                Pair Site
+                </a>
+            `);
+
+        } catch (error) {
+
+            res.send(
+                "❌ Invalid session: " +
+                error.message
+            );
         }
-      );
     }
+);
 
-    const db =
-      getMultiDB();
+// ============================================================
+// BOTS API
+// ============================================================
 
-    delete db[id];
+app.get(
+    "/bots",
+    async (req, res) => {
 
-    saveDB(
-      "multi_sessions.json",
-      db
-    );
+        if (
+            mongoose.connection.readyState === 1
+        ) {
 
-    try {
-      fs.rmSync(
-        path.join(
-          usersPath,
-          id
-        ),
-        {
-          recursive: true,
-          force: true
+            const sessions =
+                await SessionModel.find({});
+
+            return res.json({
+                active:
+                    Array.from(
+                        activeBots.keys()
+                    ),
+
+                starting:
+                    Array.from(
+                        startingBots.keys()
+                    ),
+
+                total:
+                    sessions.length,
+
+                pairingSite:
+                    PAIRING_SITE,
+
+                sessions
+            });
         }
-      );
 
-      const lockFile =
-        path.join(
-          dataPath,
-          `sent_${id}.lock`
-        );
+        res.json({
 
-      if (
-        fs.existsSync(
-          lockFile
-        )
-      ) {
-        fs.unlinkSync(
-          lockFile
-        );
-      }
-    } catch {}
+            active:
+                Array.from(
+                    activeBots.keys()
+                ),
 
-    activeBots.delete(
-      id
-    );
+            starting:
+                Array.from(
+                    startingBots.keys()
+                ),
 
-    alreadySent.delete(
-      id
-    );
+            saved:
+                Object.keys(
+                    getMultiDB()
+                ),
 
-    res.redirect(
-      `/admin?key=${encodeURIComponent(
-        ADMIN_KEY
-      )}`
-    );
-  }
+            pairingSite:
+                PAIRING_SITE
+        });
+    }
 );
 
-/* =========================================================
-   ADD BOT VIA URL
-========================================================= */
+// ============================================================
+// PAIR REDIRECT
+// ============================================================
 
 app.get(
-  "/add",
-  async (req, res) => {
-    const sid =
-      req.query.session;
+    "/pair",
+    (req, res) => {
 
-    const days =
-      parseInt(
-        req.query.days
-      ) ||
-      DEFAULT_EXPIRE_DAYS;
-
-    if (!sid) {
-      return res.send(
-        `Use ${PAIRING_SITE}`
-      );
-    }
-
-    try {
-      const b64 =
-        sid.includes("~")
-          ? sid
-              .split("~")
-              .pop()
-          : sid;
-
-      const sessionJSON =
-        JSON.parse(
-          Buffer.from(
-            b64,
-            "base64"
-          ).toString()
+        res.redirect(
+            PAIRING_SITE
         );
-
-      const userId =
-        sessionJSON.me
-          ?.id
-          ?.split(":")[0] ||
-        `user_${Date.now()}`;
-
-      saveMultiSession(
-        userId,
-        sid,
-        days
-      );
-
-      await startBotForUser(
-        userId,
-        sid,
-        days
-      );
-
-      res.send(
-        `✅ Added ${userId} for ${days} days`
-      );
-    } catch (e) {
-      res.send(
-        `❌ ${e.message}`
-      );
     }
-  }
 );
 
-/* =========================================================
-   BOTS API
-========================================================= */
+// ============================================================
+// HEALTH
+// ============================================================
 
 app.get(
-  "/bots",
-  async (req, res) => {
-    if (
-      mongoose.connection
-        .readyState === 1
-    ) {
-      const all =
-        await SessionModel.find(
-          {}
-        );
+    "/health",
+    (req, res) => {
 
-      return res.json(
-        all.map((s) => ({
-          userId:
-            s.userId,
+        res.json({
 
-          daysLeft:
-            Math.ceil(
-              (
-                new Date(
-                  s.expireAt
-                ) -
-                new Date()
-              ) /
-                86400000
-            ),
+            status: "online",
 
-          expireAt:
-            s.expireAt,
+            bot:
+                BOT_NAME,
 
-          connected:
-            activeBots.has(
-              s.userId
-            )
-        }))
-      );
+            activeBots:
+                activeBots.size,
+
+            startingBots:
+                startingBots.size,
+
+            mongo:
+                mongoose.connection.readyState === 1
+                    ? "connected"
+                    : "disconnected",
+
+            mode:
+                global.botMode,
+
+            sessionDays:
+                SESSION_DAYS,
+
+            uptime:
+                process.uptime()
+        });
     }
-
-    res.json(
-      getMultiDB()
-    );
-  }
 );
 
-/* =========================================================
-   SERVER
-========================================================= */
+// ============================================================
+// SERVER
+// ============================================================
 
 const PORT =
-  process.env.PORT || 3000;
+    process.env.PORT || 3000;
 
 app.listen(
-  PORT,
-  () => {
-    console.log(
-      `[SERVER] Running on port ${PORT}`
-    );
-  }
+    PORT,
+    () => {
+
+        console.log(
+            `[SERVER] Running on port ${PORT}`
+        );
+    }
 );
 
-/* =========================================================
-   START
-========================================================= */
+// ============================================================
+// START
+// ============================================================
 
-startAll();
+startAll()
+    .catch(
+        error => {
+
+            console.error(
+                "[START ERROR]",
+                error
+            );
+        }
+    );
