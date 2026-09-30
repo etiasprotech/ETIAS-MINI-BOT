@@ -5,10 +5,16 @@
  ETIAS-MINI-BOT
  MULTI SESSION BOT ENGINE
  WhatsApp Multi-Device
- Pairing Code Deployment
+ WEB PAIRING AUTH ONLY
  MongoDB + Local Fallback
  Live Logs
  Automatic Reconnect
+ COMMAND LOADER
+ WELCOME / GOODBYE
+ ANTILINK
+ ANTIDELETE
+ ANTIVIEWONCE
+ VIEWONCE
 ============================================================
 */
 
@@ -25,7 +31,8 @@ const {
     useMultiFileAuthState,
     DisconnectReason,
     Browsers,
-    jidNormalizedUser
+    jidNormalizedUser,
+    downloadContentFromMessage
 } = require("@whiskeysockets/baileys");
 
 /*
@@ -36,7 +43,7 @@ const {
 
 const BOT_NAME =
     process.env.BOT_NAME ||
-    "ETIAS-MINI-BOT";
+    "*ETIAS-MINI-BOT*";
 
 const PREFIX =
     process.env.PREFIX ||
@@ -91,7 +98,7 @@ const LOCAL_MULTI_DB =
 
 /*
 ============================================================
- CREATE DIRECTORIES
+ DIRECTORIES
 ============================================================
 */
 
@@ -167,7 +174,10 @@ function normalizeNumber(number) {
 
 function sanitizeSessionId(sessionId) {
     return String(sessionId || "")
-        .replace(/[^a-zA-Z0-9_-]/g, "_");
+        .replace(
+            /[^a-zA-Z0-9_-]/g,
+            "_"
+        );
 }
 
 function getAuthPath(sessionId) {
@@ -206,13 +216,12 @@ function readLocalDatabase() {
     );
 
     try {
-        const data =
+        return JSON.parse(
             fs.readFileSync(
                 LOCAL_DB,
                 "utf8"
-            );
-
-        return JSON.parse(data);
+            )
+        );
     } catch {
         return {};
     }
@@ -264,7 +273,11 @@ function addLog(
         `[${sessionId}] ${message}`
     );
 
-    if (!deploymentLogs.has(sessionId)) {
+    if (
+        !deploymentLogs.has(
+            sessionId
+        )
+    ) {
         deploymentLogs.set(
             sessionId,
             []
@@ -272,7 +285,9 @@ function addLog(
     }
 
     const list =
-        deploymentLogs.get(sessionId);
+        deploymentLogs.get(
+            sessionId
+        );
 
     list.push(text);
 
@@ -293,7 +308,9 @@ function addLog(
 
 function getLogs(sessionId) {
     const memory =
-        deploymentLogs.get(sessionId);
+        deploymentLogs.get(
+            sessionId
+        );
 
     if (memory) {
         return [...memory];
@@ -386,7 +403,39 @@ const deploymentSchema =
                 default: Date.now
             },
 
-            lastSeen: Date
+            lastSeen: Date,
+
+            features: {
+                antiLink: {
+                    type: Boolean,
+                    default: false
+                },
+
+                antiDelete: {
+                    type: Boolean,
+                    default: false
+                },
+
+                antiViewOnce: {
+                    type: Boolean,
+                    default: false
+                },
+
+                welcome: {
+                    type: Boolean,
+                    default: true
+                },
+
+                goodbye: {
+                    type: Boolean,
+                    default: true
+                },
+
+                viewOnce: {
+                    type: Boolean,
+                    default: false
+                }
+            }
         },
         {
             minimize: false
@@ -420,7 +469,8 @@ async function connectMongo() {
 
     try {
         if (
-            mongoose.connection.readyState === 1
+            mongoose.connection
+                .readyState === 1
         ) {
             mongoReady = true;
             return true;
@@ -492,8 +542,12 @@ async function updateSession(
         authFolder:
             session.authFolder,
 
+        /*
+         * Kept for compatibility,
+         * but main.js NEVER generates
+         * a pairing code.
+         */
         pairingCode:
-            session.pairingCode ||
             null,
 
         reconnects:
@@ -509,13 +563,28 @@ async function updateSession(
             session.createdAt,
 
         lastSeen:
-            session.lastSeen ||
-            null
-    };
+            session.lastSeen || null,
 
-    /*
-     * Mongo
-     */
+        features: {
+            antiLink:
+                !!session.antiLink,
+
+            antiDelete:
+                !!session.antiDelete,
+
+            antiViewOnce:
+                !!session.antiViewOnce,
+
+            welcome:
+                session.welcome !== false,
+
+            goodbye:
+                session.goodbye !== false,
+
+            viewOnce:
+                !!session.viewOnce
+        }
+    };
 
     if (mongoReady) {
         try {
@@ -537,10 +606,6 @@ async function updateSession(
             );
         }
     }
-
-    /*
-     * Local
-     */
 
     try {
         const db =
@@ -588,14 +653,16 @@ async function removeDeployment(
 
 /*
 ============================================================
- GET DEPLOYMENT
+ FIND DEPLOYMENT
 ============================================================
 */
 
 async function findDeployment(
     sessionId
 ) {
-    if (sessions.has(sessionId)) {
+    if (
+        sessions.has(sessionId)
+    ) {
         return sessions.get(
             sessionId
         );
@@ -604,9 +671,11 @@ async function findDeployment(
     if (mongoReady) {
         try {
             const found =
-                await Deployment.findOne({
-                    sessionId
-                }).lean();
+                await Deployment
+                    .findOne({
+                        sessionId
+                    })
+                    .lean();
 
             if (found) {
                 return found;
@@ -618,8 +687,10 @@ async function findDeployment(
         const db =
             readLocalDatabase();
 
-        return db[sessionId] ||
-            null;
+        return (
+            db[sessionId] ||
+            null
+        );
     } catch {
         return null;
     }
@@ -639,7 +710,9 @@ async function getAllDeployments() {
         sessions.values()
     ) {
         result.push(
-            sessionSummary(session)
+            sessionSummary(
+                session
+            )
         );
     }
 
@@ -715,8 +788,27 @@ function sessionSummary(
             session.commandCount,
 
         pairingCode:
-            session.pairingCode ||
-            null
+            null,
+
+        features: {
+            antiLink:
+                !!session.antiLink,
+
+            antiDelete:
+                !!session.antiDelete,
+
+            antiViewOnce:
+                !!session.antiViewOnce,
+
+            welcome:
+                session.welcome !== false,
+
+            goodbye:
+                session.goodbye !== false,
+
+            viewOnce:
+                !!session.viewOnce
+        }
     };
 }
 
@@ -778,11 +870,11 @@ function createSession(
         connected:
             false,
 
+        /*
+         * No pairing code.
+         */
         pairingCode:
             null,
-
-        pairingRequested:
-            false,
 
         mode:
             options.mode ||
@@ -812,22 +904,52 @@ function createSession(
         reconnectTimer:
             null,
 
-        pairingTimer:
-            null,
-
         authFolder:
             getAuthPath(
                 sessionId
             ),
 
+        /*
+         * BOT FEATURES
+         */
+
         antiLink:
+            options.features
+                ?.antiLink ??
             false,
 
         antiDelete:
+            options.features
+                ?.antiDelete ??
             false,
 
         antiViewOnce:
-            false
+            options.features
+                ?.antiViewOnce ??
+            false,
+
+        welcome:
+            options.features
+                ?.welcome ??
+            true,
+
+        goodbye:
+            options.features
+                ?.goodbye ??
+            true,
+
+        viewOnce:
+            options.features
+                ?.viewOnce ??
+            false,
+
+        /*
+         * Message cache for
+         * antidelete/viewonce.
+         */
+
+        messageStore:
+            new Map()
     };
 }
 
@@ -886,53 +1008,97 @@ function loadCommands() {
                 require(fullPath);
 
             if (
-                !command ||
-                typeof command !==
-                    "object"
+                !command
             ) {
                 continue;
             }
 
             const names = [];
 
-            if (
-                command.name
-            ) {
-                names.push(
-                    String(
-                        command.name
-                    ).toLowerCase()
-                );
-            }
+            /*
+             * Direct function command
+             */
 
             if (
-                Array.isArray(
-                    command.alias
-                )
+                typeof command ===
+                "function"
             ) {
-                command.alias.forEach(
-                    (alias) =>
-                        names.push(
-                            String(
-                                alias
-                            ).toLowerCase()
+                const name =
+                    path
+                        .basename(
+                            file,
+                            ".js"
                         )
-                );
+                        .toLowerCase();
+
+                names.push(name);
             }
 
+            /*
+             * Object command
+             */
+
             if (
-                Array.isArray(
-                    command.aliases
-                )
+                typeof command ===
+                "object"
             ) {
-                command.aliases.forEach(
-                    (alias) =>
-                        names.push(
-                            String(
-                                alias
-                            ).toLowerCase()
-                        )
-                );
+                if (
+                    command.name
+                ) {
+                    names.push(
+                        String(
+                            command.name
+                        ).toLowerCase()
+                    );
+                }
+
+                if (
+                    Array.isArray(
+                        command.alias
+                    )
+                ) {
+                    command.alias.forEach(
+                        (alias) =>
+                            names.push(
+                                String(
+                                    alias
+                                ).toLowerCase()
+                            )
+                    );
+                }
+
+                if (
+                    Array.isArray(
+                        command.aliases
+                    )
+                ) {
+                    command.aliases.forEach(
+                        (alias) =>
+                            names.push(
+                                String(
+                                    alias
+                                ).toLowerCase()
+                            )
+                    );
+                }
+
+                /*
+                 * If no explicit name,
+                 * use filename.
+                 */
+
+                if (
+                    names.length === 0
+                ) {
+                    names.push(
+                        path
+                            .basename(
+                                file,
+                                ".js"
+                            )
+                            .toLowerCase()
+                    );
+                }
             }
 
             if (
@@ -942,7 +1108,8 @@ function loadCommands() {
             }
 
             for (
-                const name of names
+                const name of
+                names
             ) {
                 loadedCommands.set(
                     name,
@@ -962,6 +1129,27 @@ function loadCommands() {
     console.log(
         `[COMMANDS] ${count} commands loaded`
     );
+
+    addLog(
+        "SYSTEM",
+        `${count} commands loaded from commands folder`
+    );
+}
+
+/*
+============================================================
+ RELOAD COMMANDS
+============================================================
+*/
+
+function reloadCommands() {
+    loadCommands();
+
+    return {
+        success: true,
+        count:
+            loadedCommands.size
+    };
 }
 
 /*
@@ -1040,12 +1228,6 @@ function isOwner(
     jid,
     session
 ) {
-    if (
-        !OWNER_NUMBER
-    ) {
-        return false;
-    }
-
     const sender =
         String(jid || "")
             .split("@")[0]
@@ -1053,7 +1235,7 @@ function isOwner(
             .replace(/\D/g, "");
 
     if (
-        sender &&
+        OWNER_NUMBER &&
         sender === OWNER_NUMBER
     ) {
         return true;
@@ -1094,9 +1276,68 @@ async function reply(
                 : undefined
         );
     } catch (error) {
-        addLog(
-            "SYSTEM",
-            `Reply failed: ${error.message}`
+        return null;
+    }
+}
+
+/*
+============================================================
+ GROUP CHECK
+============================================================
+*/
+
+function isGroupJid(jid) {
+    return String(jid || "")
+        .endsWith("@g.us");
+}
+
+/*
+============================================================
+ STORE MESSAGE
+============================================================
+*/
+
+function storeMessage(
+    session,
+    message
+) {
+    if (
+        !message?.key?.id
+    ) {
+        return;
+    }
+
+    if (
+        !session.messageStore
+    ) {
+        session.messageStore =
+            new Map();
+    }
+
+    const id =
+        message.key.id;
+
+    session.messageStore.set(
+        id,
+        message
+    );
+
+    /*
+     * Keep only latest 500.
+     */
+
+    if (
+        session.messageStore.size >
+        500
+    ) {
+        const first =
+            session.messageStore
+                .keys()
+                .next()
+                .value;
+
+        session.messageStore.delete(
+            first
         );
     }
 }
@@ -1157,7 +1398,7 @@ Bringing AI to your fingertips`;
 
         addLog(
             session.sessionId,
-            "Session ID sent to WhatsApp"
+            "✅ Session ID sent to WhatsApp"
         );
     } catch (error) {
         addLog(
@@ -1169,101 +1410,872 @@ Bringing AI to your fingertips`;
 
 /*
 ============================================================
- PAIRING CODE
+ NO PAIRING CODE
 ============================================================
 */
 
-async function requestPairingCode(
+function pairingCodeDisabled(
     session
 ) {
+    addLog(
+        session.sessionId,
+        "🔐 Pairing code generation is disabled. Waiting for web pairing/authentication."
+    );
+}
+
+/*
+============================================================
+ FEATURE: ANTILINK
+============================================================
+*/
+
+async function handleAntiLink(
+    session,
+    message,
+    text
+) {
     if (
-        !session.sock ||
-        !session.phone
+        !session.antiLink
+    ) {
+        return false;
+    }
+
+    if (
+        !isGroupJid(
+            message.key?.remoteJid
+        )
+    ) {
+        return false;
+    }
+
+    if (
+        !/https?:\/\/|www\./i.test(
+            text
+        )
+    ) {
+        return false;
+    }
+
+    const remoteJid =
+        message.key.remoteJid;
+
+    const sender =
+        message.key.participant ||
+        remoteJid;
+
+    /*
+     * Do not delete owner messages.
+     */
+
+    if (
+        isOwner(
+            sender,
+            session
+        )
+    ) {
+        return false;
+    }
+
+    try {
+        await session.sock.sendMessage(
+            remoteJid,
+            {
+                delete:
+                    message.key
+            }
+        );
+
+        await reply(
+            session.sock,
+            remoteJid,
+            "🚫 Link removed.\n\nAntilink is active."
+        );
+
+        addLog(
+            session.sessionId,
+            `🔗 Antilink removed message from ${sender}`
+        );
+
+        return true;
+    } catch (error) {
+        addLog(
+            session.sessionId,
+            `Antilink failed: ${error.message}`
+        );
+
+        return false;
+    }
+}
+
+/*
+============================================================
+ FEATURE: ANTIDELETE
+============================================================
+*/
+
+async function handleDeletedMessage(
+    session,
+    update
+) {
+    if (
+        !session.antiDelete
+    ) {
+        return;
+    }
+
+    const key =
+        update?.key;
+
+    if (!key?.id) {
+        return;
+    }
+
+    const oldMessage =
+        session.messageStore.get(
+            key.id
+        );
+
+    if (!oldMessage) {
+        addLog(
+            session.sessionId,
+            `🗑️ Deleted message detected: ${key.id}`
+        );
+
+        return;
+    }
+
+    const remoteJid =
+        key.remoteJid;
+
+    if (!remoteJid) {
+        return;
+    }
+
+    const text =
+        getMessageText(
+            oldMessage
+        );
+
+    try {
+        await session.sock.sendMessage(
+            remoteJid,
+            {
+                text:
+`🗑️ *MESSAGE DELETED*
+
+👤 From:
+${key.participant || key.remoteJid}
+
+💬 Message:
+${text || "[media/message]"}`
+            }
+        );
+
+        addLog(
+            session.sessionId,
+            "🗑️ Deleted message recovered/reported"
+        );
+    } catch (error) {
+        addLog(
+            session.sessionId,
+            `Antidelete failed: ${error.message}`
+        );
+    }
+}
+
+/*
+============================================================
+ FEATURE: VIEW ONCE
+============================================================
+*/
+
+function getViewOnceMessage(
+    message
+) {
+    if (
+        !message?.message
     ) {
         return null;
     }
 
+    const msg =
+        message.message;
+
+    /*
+     * Direct viewOnce wrapper
+     */
+
     if (
-        session.pairingRequested
+        msg.viewOnceMessage
+            ?.message
     ) {
-        return session.pairingCode;
+        return (
+            msg.viewOnceMessage
+                .message
+        );
+    }
+
+    /*
+     * V2 wrapper
+     */
+
+    if (
+        msg.viewOnceMessageV2
+            ?.message
+    ) {
+        return (
+            msg.viewOnceMessageV2
+                .message
+        );
+    }
+
+    /*
+     * V2 extension
+     */
+
+    if (
+        msg.viewOnceMessageV2Extension
+            ?.message
+    ) {
+        return (
+            msg.viewOnceMessageV2Extension
+                .message
+        );
+    }
+
+    return null;
+}
+
+async function handleViewOnce(
+    session,
+    message
+) {
+    if (
+        !session.antiViewOnce &&
+        !session.viewOnce
+    ) {
+        return;
+    }
+
+    const content =
+        getViewOnceMessage(
+            message
+        );
+
+    if (!content) {
+        return;
+    }
+
+    const remoteJid =
+        message.key?.remoteJid;
+
+    if (!remoteJid) {
+        return;
     }
 
     try {
-        session.pairingRequested =
-            true;
-
-        addLog(
-            session.sessionId,
-            `Requesting WhatsApp pairing code for +${session.phone}`
-        );
-
         /*
-         * Baileys returns an 8-character
-         * WhatsApp pairing code.
+         * IMAGE
          */
 
-        const code =
-            await session.sock
-                .requestPairingCode(
-                    session.phone
+        if (
+            content.imageMessage
+        ) {
+            const image =
+                content.imageMessage;
+
+            const stream =
+                await downloadContentFromMessage(
+                    image,
+                    "image"
                 );
 
-        session.pairingCode =
-            String(code || "")
-                .toUpperCase();
+            const chunks = [];
 
-        session.status =
-            "pairing";
+            for await (
+                const chunk of
+                stream
+            ) {
+                chunks.push(chunk);
+            }
+
+            const buffer =
+                Buffer.concat(
+                    chunks
+                );
+
+            await session.sock.sendMessage(
+                remoteJid,
+                {
+                    image: buffer,
+
+                    caption:
+                        image.caption ||
+                        "👁️ View-once media"
+                }
+            );
+
+            addLog(
+                session.sessionId,
+                "👁️ View-once image handled"
+            );
+
+            return;
+        }
+
+        /*
+         * VIDEO
+         */
+
+        if (
+            content.videoMessage
+        ) {
+            const video =
+                content.videoMessage;
+
+            const stream =
+                await downloadContentFromMessage(
+                    video,
+                    "video"
+                );
+
+            const chunks = [];
+
+            for await (
+                const chunk of
+                stream
+            ) {
+                chunks.push(chunk);
+            }
+
+            const buffer =
+                Buffer.concat(
+                    chunks
+                );
+
+            await session.sock.sendMessage(
+                remoteJid,
+                {
+                    video: buffer,
+
+                    caption:
+                        video.caption ||
+                        "👁️ View-once media"
+                }
+            );
+
+            addLog(
+                session.sessionId,
+                "👁️ View-once video handled"
+            );
+
+            return;
+        }
+
+        /*
+         * AUDIO
+         */
+
+        if (
+            content.audioMessage
+        ) {
+            const audio =
+                content.audioMessage;
+
+            const stream =
+                await downloadContentFromMessage(
+                    audio,
+                    "audio"
+                );
+
+            const chunks = [];
+
+            for await (
+                const chunk of
+                stream
+            ) {
+                chunks.push(chunk);
+            }
+
+            const buffer =
+                Buffer.concat(
+                    chunks
+                );
+
+            await session.sock.sendMessage(
+                remoteJid,
+                {
+                    audio: buffer,
+
+                    mimetype:
+                        audio.mimetype ||
+                        "audio/mp4",
+
+                    ptt:
+                        !!audio.ptt
+                }
+            );
+
+            addLog(
+                session.sessionId,
+                "👁️ View-once audio handled"
+            );
+
+            return;
+        }
+
+        /*
+         * TEXT
+         */
+
+        const text =
+            getMessageText({
+                message: content
+            });
+
+        if (text) {
+            await reply(
+                session.sock,
+                remoteJid,
+                `👁️ View-once content:\n\n${text}`
+            );
+        }
+    } catch (error) {
+        addLog(
+            session.sessionId,
+            `View-once handling failed: ${error.message}`
+        );
+    }
+}
+
+/*
+============================================================
+ FEATURE COMMAND CONTROL
+============================================================
+*/
+
+async function handleFeatureCommand(
+    session,
+    commandName,
+    args,
+    message,
+    remoteJid,
+    owner
+) {
+    if (
+        [
+            "antilink",
+            "antidelete",
+            "antiviewonce",
+            "welcome",
+            "goodbye",
+            "viewonce"
+        ].includes(
+            commandName
+        )
+    ) {
+        if (!owner) {
+            return true;
+        }
+    }
+
+    const state =
+        String(
+            args[0] || ""
+        ).toLowerCase();
+
+    /*
+     * ANTILINK
+     */
+
+    if (
+        commandName ===
+        "antilink"
+    ) {
+        if (
+            ![
+                "on",
+                "off"
+            ].includes(state)
+        ) {
+            await reply(
+                session.sock,
+                remoteJid,
+                `Usage:\n${PREFIX}antilink on\n${PREFIX}antilink off`
+            );
+
+            return true;
+        }
+
+        session.antiLink =
+            state === "on";
 
         await updateSession(
             session
         );
 
-        addLog(
-            session.sessionId,
-            `🔐 PAIRING CODE: ${session.pairingCode}`
+        await reply(
+            session.sock,
+            remoteJid,
+            `🔗 Antilink ${
+                session.antiLink
+                    ? "enabled"
+                    : "disabled"
+            }.`
         );
 
-        console.log("");
-        console.log(
-            "=========================================="
-        );
-        console.log(
-            ` ${BOT_NAME} PAIRING CODE`
-        );
-        console.log(
-            "=========================================="
-        );
-        console.log(
-            ` PHONE : +${session.phone}`
-        );
-        console.log(
-            ` CODE  : ${session.pairingCode}`
-        );
-        console.log(
-            ` SID   : ${session.sessionId}`
-        );
-        console.log(
-            "=========================================="
-        );
-        console.log("");
-
-        return session.pairingCode;
-    } catch (error) {
-        session.pairingRequested =
-            false;
-
-        session.status =
-            "pairing_error";
-
-        addLog(
-            session.sessionId,
-            `Pairing code failed: ${error.message}`
-        );
-
-        return null;
+        return true;
     }
+
+    /*
+     * ANTIDELETE
+     */
+
+    if (
+        commandName ===
+        "antidelete"
+    ) {
+        if (
+            ![
+                "on",
+                "off"
+            ].includes(state)
+        ) {
+            await reply(
+                session.sock,
+                remoteJid,
+                `Usage:\n${PREFIX}antidelete on\n${PREFIX}antidelete off`
+            );
+
+            return true;
+        }
+
+        session.antiDelete =
+            state === "on";
+
+        await updateSession(
+            session
+        );
+
+        await reply(
+            session.sock,
+            remoteJid,
+            `🗑️ Antidelete ${
+                session.antiDelete
+                    ? "enabled"
+                    : "disabled"
+            }.`
+        );
+
+        return true;
+    }
+
+    /*
+     * ANTIVIEWONCE
+     */
+
+    if (
+        commandName ===
+        "antiviewonce"
+    ) {
+        if (
+            ![
+                "on",
+                "off"
+            ].includes(state)
+        ) {
+            await reply(
+                session.sock,
+                remoteJid,
+                `Usage:\n${PREFIX}antiviewonce on\n${PREFIX}antiviewonce off`
+            );
+
+            return true;
+        }
+
+        session.antiViewOnce =
+            state === "on";
+
+        await updateSession(
+            session
+        );
+
+        await reply(
+            session.sock,
+            remoteJid,
+            `👁️ Anti-view-once ${
+                session.antiViewOnce
+                    ? "enabled"
+                    : "disabled"
+            }.`
+        );
+
+        return true;
+    }
+
+    /*
+     * VIEWONCE
+     */
+
+    if (
+        commandName ===
+        "viewonce"
+    ) {
+        session.viewOnce =
+            true;
+
+        await updateSession(
+            session
+        );
+
+        await reply(
+            session.sock,
+            remoteJid,
+            "👁️ View-once handling enabled."
+        );
+
+        return true;
+    }
+
+    /*
+     * WELCOME
+     */
+
+    if (
+        commandName ===
+        "welcome"
+    ) {
+        if (
+            ![
+                "on",
+                "off"
+            ].includes(state)
+        ) {
+            await reply(
+                session.sock,
+                remoteJid,
+                `Usage:\n${PREFIX}welcome on\n${PREFIX}welcome off`
+            );
+
+            return true;
+        }
+
+        session.welcome =
+            state === "on";
+
+        await updateSession(
+            session
+        );
+
+        await reply(
+            session.sock,
+            remoteJid,
+            `👋 Welcome ${
+                session.welcome
+                    ? "enabled"
+                    : "disabled"
+            }.`
+        );
+
+        return true;
+    }
+
+    /*
+     * GOODBYE
+     */
+
+    if (
+        commandName ===
+        "goodbye"
+    ) {
+        if (
+            ![
+                "on",
+                "off"
+            ].includes(state)
+        ) {
+            await reply(
+                session.sock,
+                remoteJid,
+                `Usage:\n${PREFIX}goodbye on\n${PREFIX}goodbye off`
+            );
+
+            return true;
+        }
+
+        session.goodbye =
+            state === "on";
+
+        await updateSession(
+            session
+        );
+
+        await reply(
+            session.sock,
+            remoteJid,
+            `👋 Goodbye ${
+                session.goodbye
+                    ? "enabled"
+                    : "disabled"
+            }.`
+        );
+
+        return true;
+    }
+
+    return false;
+}
+
+/*
+============================================================
+ COMMAND CONTEXT
+============================================================
+*/
+
+function buildCommandContext(
+    session,
+    message,
+    remoteJid,
+    args,
+    body,
+    commandName,
+    owner
+) {
+    return {
+        sock:
+            session.sock,
+
+        client:
+            session.sock,
+
+        session,
+
+        message,
+
+        msg:
+            message,
+
+        jid:
+            remoteJid,
+
+        args,
+
+        text:
+            args.join(" "),
+
+        body,
+
+        command:
+            commandName,
+
+        prefix:
+            PREFIX,
+
+        commandPrefix:
+            PREFIX,
+
+        sessionId:
+            session.sessionId,
+
+        botName:
+            BOT_NAME,
+
+        phone:
+            session.phone,
+
+        isOwner:
+            owner,
+
+        owner,
+
+        mode:
+            session.mode,
+
+        reply: async (
+            response
+        ) =>
+            reply(
+                session.sock,
+                remoteJid,
+                response,
+                message
+            ),
+
+        sendMessage:
+            async (
+                jid,
+                content
+            ) =>
+                session.sock.sendMessage(
+                    jid,
+                    content
+                ),
+
+        addLog:
+            (message) =>
+                addLog(
+                    session.sessionId,
+                    message
+                ),
+
+        reloadCommands,
+
+        getSession:
+            () =>
+                sessionSummary(
+                    session
+                )
+    };
+}
+
+/*
+============================================================
+ RUN COMMAND
+============================================================
+*/
+
+async function runCommand(
+    session,
+    command,
+    context
+) {
+    if (
+        typeof command ===
+        "function"
+    ) {
+        return command(
+            context
+        );
+    }
+
+    if (
+        typeof command.execute ===
+        "function"
+    ) {
+        return command.execute(
+            context
+        );
+    }
+
+    if (
+        typeof command.run ===
+        "function"
+    ) {
+        return command.run(
+            context
+        );
+    }
+
+    if (
+        typeof command.handler ===
+        "function"
+    ) {
+        return command.handler(
+            context
+        );
+    }
+
+    return null;
 }
 
 /*
@@ -1281,6 +2293,31 @@ async function processMessage(
         !message
     ) {
         return;
+    }
+
+    /*
+     * Store message BEFORE checking
+     * fromMe so antidelete can work.
+     */
+
+    storeMessage(
+        session,
+        message
+    );
+
+    /*
+     * View-once handling
+     */
+
+    if (
+        getViewOnceMessage(
+            message
+        )
+    ) {
+        await handleViewOnce(
+            session,
+            message
+        );
     }
 
     if (
@@ -1301,11 +2338,8 @@ async function processMessage(
             message
         ).trim();
 
-    if (!text) {
-        return;
-    }
-
     session.messages++;
+
     session.lastSeen =
         now();
 
@@ -1314,29 +2348,32 @@ async function processMessage(
     );
 
     /*
-     * Anti-link
+     * Antilink
      */
 
     if (
-        session.antiLink &&
-        /https?:\/\/|www\./i.test(text) &&
-        remoteJid.endsWith("@g.us")
+        text &&
+        await handleAntiLink(
+            session,
+            message,
+            text
+        )
     ) {
-        try {
-            await session.sock.sendMessage(
-                remoteJid,
-                {
-                    delete:
-                        message.key
-                }
-            );
-        } catch {}
-
         return;
     }
 
+    if (!text) {
+        return;
+    }
+
+    /*
+     * Only commands from here.
+     */
+
     if (
-        !text.startsWith(PREFIX)
+        !text.startsWith(
+            PREFIX
+        )
     ) {
         return;
     }
@@ -1362,9 +2399,6 @@ async function processMessage(
     const args =
         parts;
 
-    const argText =
-        args.join(" ");
-
     const owner =
         isOwner(
             message.key?.participant ||
@@ -1373,11 +2407,32 @@ async function processMessage(
         );
 
     /*
-     * Built-in commands
+     * Built-in feature commands
+     */
+
+    const featureHandled =
+        await handleFeatureCommand(
+            session,
+            commandName,
+            args,
+            message,
+            remoteJid,
+            owner
+        );
+
+    if (
+        featureHandled
+    ) {
+        return;
+    }
+
+    /*
+     * PING
      */
 
     if (
-        commandName === "ping"
+        commandName ===
+        "test_ping"
     ) {
         await reply(
             session.sock,
@@ -1388,8 +2443,13 @@ async function processMessage(
         return;
     }
 
+    /*
+     * ALIVE
+     */
+
     if (
-        commandName === "alive"
+        commandName ===
+        "test_alive"
     ) {
         await reply(
             session.sock,
@@ -1412,8 +2472,13 @@ async function processMessage(
         return;
     }
 
+    /*
+     * SESSION
+     */
+
     if (
-        commandName === "session"
+        commandName ===
+        "session"
     ) {
         if (!owner) {
             return;
@@ -1434,34 +2499,66 @@ ${session.sessionId}
         return;
     }
 
+    /*
+     * STATUS
+     */
+
     if (
-        commandName === "status"
+        commandName ===
+        "status"
     ) {
         await reply(
             session.sock,
             remoteJid,
 `🤖 ${BOT_NAME}
 
-Status: ${
+Status:
+${
     session.connected
         ? "ONLINE"
         : "OFFLINE"
 }
 
-Mode: ${session.mode}
+Mode:
+${session.mode}
 
-Messages: ${session.messages}
+Messages:
+${session.messages}
 
-Commands: ${session.commandCount}
+Commands:
+${session.commandCount}
 
-Reconnects: ${session.reconnects}`
+Reconnects:
+${session.reconnects}
+
+Features:
+
+🔗 Antilink:
+${session.antiLink ? "ON" : "OFF"}
+
+🗑️ Antidelete:
+${session.antiDelete ? "ON" : "OFF"}
+
+👁️ Antiviewonce:
+${session.antiViewOnce ? "ON" : "OFF"}
+
+👋 Welcome:
+${session.welcome ? "ON" : "OFF"}
+
+👋 Goodbye:
+${session.goodbye ? "ON" : "OFF"}`
         );
 
         return;
     }
 
+    /*
+     * MODE
+     */
+
     if (
-        commandName === "mode"
+        commandName ===
+        "mode"
     ) {
         if (!owner) {
             return;
@@ -1477,12 +2574,14 @@ Reconnects: ${session.reconnects}`
             ![
                 "public",
                 "private"
-            ].includes(newMode)
+            ].includes(
+                newMode
+            )
         ) {
             await reply(
                 session.sock,
                 remoteJid,
-                `Usage: ${PREFIX}mode public\nor\n${PREFIX}mode private`
+                `Usage:\n${PREFIX}mode public\n${PREFIX}mode private`
             );
 
             return;
@@ -1504,90 +2603,15 @@ Reconnects: ${session.reconnects}`
         return;
     }
 
-    if (
-        commandName === "antilink"
-    ) {
-        if (!owner) {
-            return;
-        }
-
-        const state =
-            String(
-                args[0] ||
-                ""
-            ).toLowerCase();
-
-        session.antiLink =
-            state === "on";
-
-        await reply(
-            session.sock,
-            remoteJid,
-            `🔗 Anti-link: ${
-                session.antiLink
-                    ? "ON"
-                    : "OFF"
-            }`
-        );
-
-        return;
-    }
-
-    if (
-        commandName === "antidelete"
-    ) {
-        if (!owner) {
-            return;
-        }
-
-        const state =
-            String(
-                args[0] ||
-                ""
-            ).toLowerCase();
-
-        session.antiDelete =
-            state === "on";
-
-        await reply(
-            session.sock,
-            remoteJid,
-            `🗑️ Anti-delete: ${
-                session.antiDelete
-                    ? "ON"
-                    : "OFF"
-            }`
-        );
-
-        return;
-    }
-
-    if (
-        commandName === "viewonce"
-    ) {
-        if (!owner) {
-            return;
-        }
-
-        session.antiViewOnce =
-            true;
-
-        await reply(
-            session.sock,
-            remoteJid,
-            "👁️ View-once handling enabled."
-        );
-
-        return;
-    }
-
     /*
-     * Help
+     * MENU
      */
 
     if (
-        commandName === "menu" ||
-        commandName === "help"
+        commandName ===
+            "test" ||
+        commandName ===
+            "test1"
     ) {
         await reply(
             session.sock,
@@ -1602,14 +2626,29 @@ ${PREFIX}status
 ${PREFIX}session
 ${PREFIX}menu
 
+FEATURES
+
+${PREFIX}antilink on
+${PREFIX}antilink off
+
+${PREFIX}antidelete on
+${PREFIX}antidelete off
+
+${PREFIX}antiviewonce on
+${PREFIX}antiviewonce off
+
+${PREFIX}viewonce
+
+${PREFIX}welcome on
+${PREFIX}welcome off
+
+${PREFIX}goodbye on
+${PREFIX}goodbye off
+
 OWNER
 
 ${PREFIX}mode public
 ${PREFIX}mode private
-${PREFIX}antilink on
-${PREFIX}antilink off
-${PREFIX}antidelete on
-${PREFIX}antidelete off
 
 ╰━━━━━━━━━━━━━━━━╯`
         );
@@ -1618,7 +2657,7 @@ ${PREFIX}antidelete off
     }
 
     /*
-     * Private mode
+     * PRIVATE MODE
      */
 
     if (
@@ -1630,7 +2669,8 @@ ${PREFIX}antidelete off
     }
 
     /*
-     * External commands
+     * FIND COMMAND FROM
+     * ~/bot/commands
      */
 
     const command =
@@ -1648,107 +2688,32 @@ ${PREFIX}antidelete off
         session
     );
 
-    const context = {
-        sock:
-            session.sock,
-
-        client:
-            session.sock,
-
-        session,
-
-        message,
-
-        msg:
+    const context =
+        buildCommandContext(
+            session,
             message,
-
-        jid:
             remoteJid,
-
-        args,
-
-        text:
-            argText,
-
-        body,
-
-        command:
+            args,
+            body,
             commandName,
-
-        prefix:
-            PREFIX,
-
-        commandPrefix:
-            PREFIX,
-
-        sessionId:
-            session.sessionId,
-
-        botName:
-            BOT_NAME,
-
-        isOwner:
-            owner,
-
-        owner,
-
-        reply: async (
-            response
-        ) =>
-            reply(
-                session.sock,
-                remoteJid,
-                response,
-                message
-            )
-    };
+            owner
+        );
 
     try {
-        if (
-            typeof command.execute ===
-            "function"
-        ) {
-            await command.execute(
-                context
-            );
+        await runCommand(
+            session,
+            command,
+            context
+        );
 
-            return;
-        }
-
-        if (
-            typeof command.run ===
-            "function"
-        ) {
-            await command.run(
-                context
-            );
-
-            return;
-        }
-
-        if (
-            typeof command.handler ===
-            "function"
-        ) {
-            await command.handler(
-                context
-            );
-
-            return;
-        }
-
-        if (
-            typeof command ===
-            "function"
-        ) {
-            await command(
-                context
-            );
-        }
+        addLog(
+            session.sessionId,
+            `✅ Command executed: ${PREFIX}${commandName}`
+        );
     } catch (error) {
         addLog(
             session.sessionId,
-            `Command ${commandName} failed: ${error.message}`
+            `❌ Command ${commandName} failed: ${error.message}`
         );
 
         await reply(
@@ -1756,6 +2721,331 @@ ${PREFIX}antidelete off
             remoteJid,
             `❌ Command error: ${error.message}`
         );
+    }
+}
+
+/*
+============================================================
+ GROUP WELCOME / GOODBYE
+============================================================
+*/
+
+async function handleGroupParticipants(
+    session,
+    update
+) {
+    if (
+        !session.sock
+    ) {
+        return;
+    }
+
+    const groupJid =
+        update.id;
+
+    if (!groupJid) {
+        return;
+    }
+
+    const participants =
+        update.participants ||
+        [];
+
+    /*
+     * Find command modules.
+     */
+
+    const welcomeCommand =
+        loadedCommands.get(
+            "welcome"
+        );
+
+    const goodbyeCommand =
+        loadedCommands.get(
+            "goodbye"
+        );
+
+    /*
+     * JOIN
+     */
+
+    if (
+        update.action ===
+        "add"
+    ) {
+        if (
+            !session.welcome
+        ) {
+            return;
+        }
+
+        for (
+            const participant of
+            participants
+        ) {
+            try {
+                /*
+                 * If a custom
+                 * welcome.js exists,
+                 * let it handle the event.
+                 */
+
+                if (
+                    welcomeCommand
+                ) {
+                    const context = {
+                        sock:
+                            session.sock,
+
+                        client:
+                            session.sock,
+
+                        session,
+
+                        jid:
+                            groupJid,
+
+                        participant,
+
+                        participants,
+
+                        action:
+                            "add",
+
+                        update,
+
+                        isOwner:
+                            false,
+
+                        owner:
+                            false,
+
+                        command:
+                            "welcome",
+
+                        prefix:
+                            PREFIX,
+
+                        botName:
+                            BOT_NAME,
+
+                        phone:
+                            session.phone,
+
+                        sessionId:
+                            session.sessionId,
+
+                        reply: async (
+                            response
+                        ) =>
+                            reply(
+                                session.sock,
+                                groupJid,
+                                response
+                            ),
+
+                        sendMessage:
+                            async (
+                                jid,
+                                content
+                            ) =>
+                                session.sock
+                                    .sendMessage(
+                                        jid,
+                                        content
+                                    ),
+
+                        addLog:
+                            (msg) =>
+                                addLog(
+                                    session.sessionId,
+                                    msg
+                                )
+                    };
+
+                    await runCommand(
+                        session,
+                        welcomeCommand,
+                        context
+                    );
+
+                    continue;
+                }
+
+                /*
+                 * Default welcome
+                 */
+
+                await session.sock.sendMessage(
+                    groupJid,
+                    {
+                        text:
+`👋 *WELCOME!*
+
+Welcome @${String(
+    participant
+).split("@")[0]}
+
+🤖 ${BOT_NAME}
+⚡ Bringing AI to your fingertips`,
+                        mentions: [
+                            participant
+                        ]
+                    }
+                );
+
+                addLog(
+                    session.sessionId,
+                    `👋 Welcome sent to ${participant}`
+                );
+            } catch (
+                error
+            ) {
+                addLog(
+                    session.sessionId,
+                    `Welcome failed: ${error.message}`
+                );
+            }
+        }
+
+        return;
+    }
+
+    /*
+     * LEAVE / REMOVE
+     */
+
+    if (
+        update.action ===
+            "remove" ||
+        update.action ===
+            "leave"
+    ) {
+        if (
+            !session.goodbye
+        ) {
+            return;
+        }
+
+        for (
+            const participant of
+            participants
+        ) {
+            try {
+                /*
+                 * Custom goodbye.js
+                 */
+
+                if (
+                    goodbyeCommand
+                ) {
+                    const context = {
+                        sock:
+                            session.sock,
+
+                        client:
+                            session.sock,
+
+                        session,
+
+                        jid:
+                            groupJid,
+
+                        participant,
+
+                        participants,
+
+                        action:
+                            "remove",
+
+                        update,
+
+                        command:
+                            "goodbye",
+
+                        prefix:
+                            PREFIX,
+
+                        botName:
+                            BOT_NAME,
+
+                        phone:
+                            session.phone,
+
+                        sessionId:
+                            session.sessionId,
+
+                        reply: async (
+                            response
+                        ) =>
+                            reply(
+                                session.sock,
+                                groupJid,
+                                response
+                            ),
+
+                        sendMessage:
+                            async (
+                                jid,
+                                content
+                            ) =>
+                                session.sock
+                                    .sendMessage(
+                                        jid,
+                                        content
+                                    ),
+
+                        addLog:
+                            (msg) =>
+                                addLog(
+                                    session.sessionId,
+                                    msg
+                                )
+                    };
+
+                    await runCommand(
+                        session,
+                        goodbyeCommand,
+                        context
+                    );
+
+                    continue;
+                }
+
+                /*
+                 * Default goodbye
+                 */
+
+                await session.sock.sendMessage(
+                    groupJid,
+                    {
+                        text:
+`👋 *GOODBYE!*
+
+@${String(
+    participant
+).split("@")[0]} has left the group.
+
+🤖 ${BOT_NAME}`,
+                        mentions: [
+                            participant
+                        ]
+                    }
+                );
+
+                addLog(
+                    session.sessionId,
+                    `👋 Goodbye sent to ${participant}`
+                );
+            } catch (
+                error
+            ) {
+                addLog(
+                    session.sessionId,
+                    `Goodbye failed: ${error.message}`
+                );
+            }
+        }
     }
 }
 
@@ -1775,7 +3065,8 @@ async function handleConnectionUpdate(
     } = update;
 
     if (
-        connection === "connecting"
+        connection ===
+        "connecting"
     ) {
         session.status =
             "connecting";
@@ -1790,8 +3081,13 @@ async function handleConnectionUpdate(
         );
     }
 
+    /*
+     * OPEN
+     */
+
     if (
-        connection === "open"
+        connection ===
+        "open"
     ) {
         session.connected =
             true;
@@ -1806,11 +3102,10 @@ async function handleConnectionUpdate(
             session.sock?.user?.id ||
             session.userId;
 
-        session.pairingCode =
-            null;
-
-        session.pairingRequested =
-            true;
+        /*
+         * Absolutely no pairing
+         * code generation here.
+         */
 
         await updateSession(
             session
@@ -1826,6 +3121,11 @@ async function handleConnectionUpdate(
             `👤 Logged in as ${session.userId || "unknown"}`
         );
 
+        addLog(
+            session.sessionId,
+            `📦 ${loadedCommands.size} commands available`
+        );
+
         await sendSessionId(
             session
         );
@@ -1833,8 +3133,13 @@ async function handleConnectionUpdate(
         return;
     }
 
+    /*
+     * CLOSE
+     */
+
     if (
-        connection === "close"
+        connection ===
+        "close"
     ) {
         session.connected =
             false;
@@ -1874,10 +3179,6 @@ async function handleConnectionUpdate(
             statusCode ===
             DisconnectReason.connectionReplaced;
 
-        const restartRequired =
-            statusCode ===
-            DisconnectReason.restartRequired;
-
         if (
             session.stopping ||
             loggedOut ||
@@ -1899,10 +3200,6 @@ async function handleConnectionUpdate(
             return;
         }
 
-        /*
-         * Reconnect
-         */
-
         if (
             session.reconnectTimer
         ) {
@@ -1914,7 +3211,8 @@ async function handleConnectionUpdate(
         session.reconnects++;
 
         const delay =
-            restartRequired
+            statusCode ===
+            DisconnectReason.restartRequired
                 ? 1000
                 : 5000;
 
@@ -1930,13 +3228,12 @@ async function handleConnectionUpdate(
                         session.sock =
                             null;
 
-                        session.pairingRequested =
-                            false;
-
                         await connectSession(
                             session
                         );
-                    } catch (error) {
+                    } catch (
+                        error
+                    ) {
                         addLog(
                             session.sessionId,
                             `Reconnect failed: ${error.message}`
@@ -1969,6 +3266,10 @@ async function connectSession(
         return session;
     }
 
+    /*
+     * Expiration
+     */
+
     if (
         session.expireAt &&
         new Date() >
@@ -1991,20 +3292,19 @@ async function connectSession(
         return session;
     }
 
+    /*
+     * Already connected
+     */
+
     if (
-        session.sock
+        session.sock &&
+        session.connected
     ) {
-        try {
-            if (
-                session.connected
-            ) {
-                return session;
-            }
-        } catch {}
+        return session;
     }
 
     /*
-     * Auth directory
+     * Auth folder
      */
 
     if (
@@ -2038,7 +3338,44 @@ async function connectSession(
         );
 
     /*
-     * Create socket
+     * IMPORTANT:
+     *
+     * main.js does NOT call
+     * requestPairingCode().
+     *
+     * The web pairing system must
+     * place valid Baileys credentials
+     * in this auth folder.
+     */
+
+    if (
+        !state.creds.registered
+    ) {
+        session.status =
+            "waiting_for_pairing";
+
+        await updateSession(
+            session
+        );
+
+        addLog(
+            session.sessionId,
+            "🔐 No registered credentials found."
+        );
+
+        addLog(
+            session.sessionId,
+            "🌐 Waiting for the web pairing system to authenticate this session."
+        );
+    } else {
+        addLog(
+            session.sessionId,
+            "🔐 Existing WhatsApp credentials found."
+        );
+    }
+
+    /*
+     * SOCKET
      */
 
     const sock =
@@ -2081,7 +3418,7 @@ async function connectSession(
         sock;
 
     /*
-     * Credentials
+     * CREDENTIALS
      */
 
     sock.ev.on(
@@ -2089,7 +3426,9 @@ async function connectSession(
         async () => {
             try {
                 await saveCreds();
-            } catch (error) {
+            } catch (
+                error
+            ) {
                 addLog(
                     session.sessionId,
                     `Credential save failed: ${error.message}`
@@ -2099,7 +3438,7 @@ async function connectSession(
     );
 
     /*
-     * Connection
+     * CONNECTION
      */
 
     sock.ev.on(
@@ -2110,7 +3449,9 @@ async function connectSession(
                     session,
                     update
                 );
-            } catch (error) {
+            } catch (
+                error
+            ) {
                 addLog(
                     session.sessionId,
                     `Connection handler error: ${error.message}`
@@ -2120,7 +3461,7 @@ async function connectSession(
     );
 
     /*
-     * Messages
+     * MESSAGES
      */
 
     sock.ev.on(
@@ -2145,7 +3486,9 @@ async function connectSession(
                         session,
                         message
                     );
-                } catch (error) {
+                } catch (
+                    error
+                ) {
                     addLog(
                         session.sessionId,
                         `Message handler error: ${error.message}`
@@ -2156,7 +3499,9 @@ async function connectSession(
     );
 
     /*
-     * Message updates
+     * MESSAGE UPDATES
+     *
+     * Used by antidelete.
      */
 
     sock.ev.on(
@@ -2172,14 +3517,28 @@ async function connectSession(
                 const item of
                 updates || []
             ) {
-                if (
-                    item.update
-                        ?.message ===
-                    null
+                try {
+                    /*
+                     * Deleted message
+                     * usually has message:null.
+                     */
+
+                    if (
+                        item.update
+                            ?.message ===
+                        null
+                    ) {
+                        await handleDeletedMessage(
+                            session,
+                            item
+                        );
+                    }
+                } catch (
+                    error
                 ) {
                     addLog(
                         session.sessionId,
-                        "🗑️ A message was deleted"
+                        `Antidelete event failed: ${error.message}`
                     );
                 }
             }
@@ -2187,70 +3546,44 @@ async function connectSession(
     );
 
     /*
-     * Group participants
+     * GROUP PARTICIPANTS
      */
 
     sock.ev.on(
         "group-participants.update",
         async (update) => {
             try {
+                await handleGroupParticipants(
+                    session,
+                    update
+                );
+            } catch (
+                error
+            ) {
                 addLog(
                     session.sessionId,
-                    `Group event: ${update.action}`
+                    `Group event failed: ${error.message}`
                 );
-            } catch {}
+            }
         }
     );
 
     /*
-     * Pairing code
-     *
-     * Only request it when there
-     * are no registered credentials.
+     * NO PAIRING CODE.
      */
 
     if (
-        !state.creds.registered &&
-        session.phone
+        !state.creds.registered
     ) {
-        /*
-         * Give the socket time to
-         * initialize before requesting.
-         */
-
-        if (
-            session.pairingTimer
-        ) {
-            clearTimeout(
-                session.pairingTimer
-            );
-        }
-
-        session.pairingTimer =
-            setTimeout(
-                async () => {
-                    try {
-                        await requestPairingCode(
-                            session
-                        );
-                    } catch (error) {
-                        addLog(
-                            session.sessionId,
-                            `Pairing request error: ${error.message}`
-                        );
-                    }
-                },
-                2500
-            );
-    } else {
-        addLog(
-            session.sessionId,
-            "Existing credentials found. Skipping pairing code."
+        pairingCodeDisabled(
+            session
         );
     }
 
     session.status =
-        "connecting";
+        state.creds.registered
+            ? "connecting"
+            : "waiting_for_pairing";
 
     await updateSession(
         session
@@ -2289,8 +3622,45 @@ async function deploySession(
     }
 
     /*
-     * Prevent duplicate deployment
-     * for the same active number.
+     * Use the Session ID supplied
+     * by the web deployment page.
+     *
+     * A fallback is kept for API
+     * compatibility, but NO pairing
+     * code is ever generated.
+     */
+
+    const sessionId =
+        String(
+            options.sessionId ||
+            generateSessionId()
+        );
+
+    /*
+     * Prevent duplicate session.
+     */
+
+    if (
+        sessions.has(
+            sessionId
+        )
+    ) {
+        const existing =
+            sessions.get(
+                sessionId
+            );
+
+        return {
+            success: true,
+            existing: true,
+            ...sessionSummary(
+                existing
+            )
+        };
+    }
+
+    /*
+     * Prevent duplicate number.
      */
 
     for (
@@ -2298,25 +3668,21 @@ async function deploySession(
         sessions.values()
     ) {
         if (
-            existing.phone === phone &&
+            existing.phone ===
+                phone &&
             !existing.stopping
         ) {
             return {
                 success: true,
+
                 existing: true,
+
                 ...sessionSummary(
                     existing
-                ),
-                code:
-                    existing.pairingCode ||
-                    null
+                )
             };
         }
     }
-
-    const sessionId =
-        options.sessionId ||
-        generateSessionId();
 
     const session =
         createSession({
@@ -2334,7 +3700,10 @@ async function deploySession(
 
             pairId:
                 options.pairId ||
-                randomId(12)
+                randomId(12),
+
+            features:
+                options.features
         });
 
     sessions.set(
@@ -2347,15 +3716,34 @@ async function deploySession(
         `🚀 Deployment created for +${phone}`
     );
 
+    addLog(
+        sessionId,
+        `🆔 Session ID: ${sessionId}`
+    );
+
+    addLog(
+        sessionId,
+        `📅 Duration: ${session.days} days`
+    );
+
     await updateSession(
         session
     );
+
+    /*
+     * Load latest commands before
+     * the deployed bot starts.
+     */
+
+    loadCommands();
 
     try {
         await connectSession(
             session
         );
-    } catch (error) {
+    } catch (
+        error
+    ) {
         session.status =
             "error";
 
@@ -2371,19 +3759,6 @@ async function deploySession(
         throw error;
     }
 
-    /*
-     * Wait briefly so the pairing
-     * code has time to appear.
-     */
-
-    await new Promise(
-        (resolve) =>
-            setTimeout(
-                resolve,
-                3500
-            )
-    );
-
     return {
         success: true,
 
@@ -2398,10 +3773,6 @@ async function deploySession(
         pairId:
             session.pairId,
 
-        code:
-            session.pairingCode ||
-            null,
-
         status:
             session.status,
 
@@ -2409,7 +3780,10 @@ async function deploySession(
             session.connected,
 
         expireAt:
-            session.expireAt
+            session.expireAt,
+
+        commands:
+            loadedCommands.size
     };
 }
 
@@ -2447,24 +3821,10 @@ async function stopSession(
         );
     }
 
-    if (
-        session.pairingTimer
-    ) {
-        clearTimeout(
-            session.pairingTimer
-        );
-    }
-
     try {
-        if (
-            session.sock
-        ) {
-            try {
-                session.sock.end(
-                    undefined
-                );
-            } catch {}
-        }
+        session.sock?.end(
+            undefined
+        );
     } catch {}
 
     session.sock =
@@ -2531,7 +3891,10 @@ async function restartSession(
                     saved.mode,
 
                 pairId:
-                    saved.pairId
+                    saved.pairId,
+
+                features:
+                    saved.features
             });
 
         sessions.set(
@@ -2546,14 +3909,10 @@ async function restartSession(
     session.connected =
         false;
 
-    session.pairingRequested =
-        false;
-
-    session.pairingCode =
-        null;
-
     session.status =
         "restarting";
+
+    loadCommands();
 
     addLog(
         sessionId,
@@ -2566,6 +3925,89 @@ async function restartSession(
 
     await connectSession(
         session
+    );
+
+    return sessionSummary(
+        session
+    );
+}
+
+/*
+============================================================
+ RENEW SESSION
+============================================================
+*/
+
+async function renewSession(
+    sessionId,
+    days
+) {
+    const session =
+        sessions.get(
+            sessionId
+        );
+
+    if (!session) {
+        throw new Error(
+            "Session not found"
+        );
+    }
+
+    const extraDays =
+        Number(days);
+
+    if (
+        !Number.isFinite(
+            extraDays
+        ) ||
+        extraDays <= 0
+    ) {
+        throw new Error(
+            "Invalid renewal days"
+        );
+    }
+
+    const base =
+        session.expireAt &&
+        new Date(
+            session.expireAt
+        ) > new Date()
+            ? new Date(
+                  session.expireAt
+              )
+            : new Date();
+
+    session.expireAt =
+        new Date(
+            base.getTime() +
+            extraDays *
+                24 *
+                60 *
+                60 *
+                1000
+        );
+
+    session.days +=
+        extraDays;
+
+    if (
+        session.status ===
+        "expired"
+    ) {
+        session.status =
+            "online";
+
+        session.stopping =
+            false;
+    }
+
+    await updateSession(
+        session
+    );
+
+    addLog(
+        sessionId,
+        `♻️ Session renewed for ${extraDays} additional days`
     );
 
     return sessionSummary(
@@ -2599,14 +4041,6 @@ async function removeSession(
             );
         }
 
-        if (
-            session.pairingTimer
-        ) {
-            clearTimeout(
-                session.pairingTimer
-            );
-        }
-
         try {
             session.sock?.end(
                 undefined
@@ -2623,7 +4057,7 @@ async function removeSession(
     );
 
     /*
-     * Delete auth folder
+     * Delete auth folder.
      */
 
     try {
@@ -2667,10 +4101,6 @@ async function removeSession(
 async function restoreSessions() {
     let deployments = [];
 
-    /*
-     * Mongo
-     */
-
     if (mongoReady) {
         try {
             deployments =
@@ -2679,10 +4109,6 @@ async function restoreSessions() {
                     .lean();
         } catch {}
     }
-
-    /*
-     * Local fallback
-     */
 
     if (
         deployments.length === 0
@@ -2693,10 +4119,6 @@ async function restoreSessions() {
         deployments =
             Object.values(db);
     }
-
-    /*
-     * Legacy database
-     */
 
     if (
         deployments.length === 0
@@ -2717,8 +4139,10 @@ async function restoreSessions() {
                 deployments.push({
                     sessionId:
                         value,
+
                     phone:
                         userId,
+
                     userId
                 });
             } else if (
@@ -2758,11 +4182,6 @@ async function restoreSessions() {
                 continue;
             }
 
-            /*
-             * Do not restore expired
-             * sessions.
-             */
-
             if (
                 saved.expireAt &&
                 new Date() >
@@ -2777,11 +4196,6 @@ async function restoreSessions() {
 
                 continue;
             }
-
-            /*
-             * Phone can sometimes be
-             * missing from older records.
-             */
 
             const phone =
                 normalizeNumber(
@@ -2816,7 +4230,10 @@ async function restoreSessions() {
 
                     pairId:
                         saved.pairId ||
-                        randomId(12)
+                        randomId(12),
+
+                    features:
+                        saved.features
                 });
 
             session.userId =
@@ -2859,14 +4276,16 @@ async function restoreSessions() {
                 "♻️ Restoring saved session..."
             );
 
+            /*
+             * Commands are loaded before
+             * restored session starts.
+             */
+
+            loadCommands();
+
             await connectSession(
                 session
             );
-
-            /*
-             * Small delay between
-             * multiple connections.
-             */
 
             await new Promise(
                 (resolve) =>
@@ -2875,7 +4294,9 @@ async function restoreSessions() {
                         1000
                     )
             );
-        } catch (error) {
+        } catch (
+            error
+        ) {
             console.error(
                 `[RESTORE] Failed ${saved.sessionId}:`,
                 error.message
@@ -2886,7 +4307,7 @@ async function restoreSessions() {
 
 /*
 ============================================================
- EXPIRATION CHECKER
+ EXPIRATION
 ============================================================
 */
 
@@ -2952,13 +4373,15 @@ const botManager = {
         },
 
     getSessions:
-        () => {
-            return Array.from(
+        () =>
+            Array.from(
                 sessions.values()
             ).map(
                 sessionSummary
-            );
-        },
+            ),
+
+    getAll:
+        getAllDeployments,
 
     getLogs:
         getLogs,
@@ -2969,8 +4392,18 @@ const botManager = {
     restart:
         restartSession,
 
+    renew:
+        renewSession,
+
     remove:
         removeSession,
+
+    reloadCommands:
+        reloadCommands,
+
+    commandCount:
+        () =>
+            loadedCommands.size,
 
     stats:
         () => ({
@@ -2991,8 +4424,11 @@ const botManager = {
                 ).filter(
                     (s) =>
                         s.status ===
-                        "pairing"
-                ).length
+                        "waiting_for_pairing"
+                ).length,
+
+            commands:
+                loadedCommands.size
         })
 };
 
@@ -3064,7 +4500,9 @@ async function startServer() {
         console.log(
             "[SERVER] server.js loaded"
         );
-    } catch (error) {
+    } catch (
+        error
+    ) {
         serverStarted =
             false;
 
@@ -3116,33 +4554,51 @@ function startHeartbeat() {
 
 async function start() {
     console.log("");
+
     console.log(
         "=============================================="
     );
+
     console.log(
         `       ${BOT_NAME}`
     );
+
     console.log(
         "       MULTI SESSION ENGINE"
     );
+
+    console.log(
+        "       WEB PAIRING AUTH"
+    );
+
     console.log(
         "=============================================="
     );
+
     console.log(
         `Node: ${process.version}`
     );
+
     console.log(
         `Platform: ${process.platform}`
     );
+
     console.log(
         `Port: ${PORT}`
     );
+
     console.log(
         `Prefix: ${PREFIX}`
     );
+
+    console.log(
+        "Pairing Code: DISABLED"
+    );
+
     console.log(
         "=============================================="
     );
+
     console.log("");
 
     /*
@@ -3170,7 +4626,7 @@ async function start() {
     await restoreSessions();
 
     /*
-     * Expiration checker
+     * Expiration
      */
 
     setInterval(
@@ -3188,12 +4644,21 @@ async function start() {
     startHeartbeat();
 
     console.log("");
+
     console.log(
         `[BOT] ${BOT_NAME} is ready`
     );
 
     console.log(
         `[BOT] Active sessions: ${sessions.size}`
+    );
+
+    console.log(
+        `[COMMANDS] ${loadedCommands.size} commands available`
+    );
+
+    console.log(
+        "[PAIRING] Waiting for web pairing/authentication"
     );
 
     console.log("");
@@ -3237,14 +4702,6 @@ async function shutdown(
             ) {
                 clearTimeout(
                     session.reconnectTimer
-                );
-            }
-
-            if (
-                session.pairingTimer
-            ) {
-                clearTimeout(
-                    session.pairingTimer
                 );
             }
 
@@ -3331,6 +4788,8 @@ module.exports = {
 
     restartSession,
 
+    renewSession,
+
     removeSession,
 
     getAllDeployments,
@@ -3341,7 +4800,11 @@ module.exports = {
 
     addLog,
 
-    generateSessionId
+    generateSessionId,
+
+    loadCommands,
+
+    reloadCommands
 };
 
 /*

@@ -3,1412 +3,819 @@
 require("dotenv").config();
 
 const express = require("express");
+const mongoose = require("mongoose");
 const fs = require("fs");
 const path = require("path");
-const mongoose = require("mongoose");
 
 const app = express();
 
 const PORT = process.env.PORT || 3000;
-
 const BOT_NAME = process.env.BOT_NAME || "ETIAS-MINI-BOT";
-const VERSION = "V4 MULTI + PAIRING + MONGO";
-
 const PAIRING_SITE =
     process.env.PAIRING_SITE ||
     "https://etias-mini-bot-pair.onrender.com/";
 
-const MONGODB_URI =
+const MONGO_URI =
     process.env.MONGODB_URI ||
     process.env.MONGO_URI ||
     "";
 
-const BOT_IMAGE_PATH = path.join(__dirname, "media", "bot.jpg");
-const BOT_IMAGE_PNG = path.join(__dirname, "media", "bot_image.png");
-
-const DATA_DIR = path.join(__dirname, "data");
-const MULTI_FILE = path.join(DATA_DIR, "multi_sessions.json");
-
-if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-}
-
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-/*
-|--------------------------------------------------------------------------
-| MongoDB
-|--------------------------------------------------------------------------
-*/
+/* =========================
+   MONGODB
+========================= */
 
-const sessionSchema = new mongoose.Schema(
-    {
-        userId: {
-            type: String,
-            unique: true,
-            index: true
-        },
+const schema = new mongoose.Schema({
+    userId: String,
+    sessionId: { type: String, index: true },
+    phone: String,
+    pairId: String,
+    connected: Boolean,
+    status: String,
+    mode: String,
+    days: Number,
+    expireAt: Date,
+    createdAt: Date,
+    lastSeen: Date,
+    reconnects: Number,
+    messages: Number,
+    commandCount: Number
+}, { minimize: false });
 
-        sessionId: {
-            type: String,
-            index: true
-        },
-
-        phone: String,
-
-        pairId: String,
-
-        connected: {
-            type: Boolean,
-            default: false
-        },
-
-        status: {
-            type: String,
-            default: "offline"
-        },
-
-        mode: {
-            type: String,
-            default: "public"
-        },
-
-        days: Number,
-
-        expireAt: Date,
-
-        createdAt: {
-            type: Date,
-            default: Date.now
-        },
-
-        lastSeen: Date,
-
-        reconnects: {
-            type: Number,
-            default: 0
-        },
-
-        messages: {
-            type: Number,
-            default: 0
-        },
-
-        commandCount: {
-            type: Number,
-            default: 0
-        }
-    },
-    {
-        minimize: false
-    }
-);
-
-const SessionModel =
+const Session =
     mongoose.models.Session ||
-    mongoose.model("Session", sessionSchema);
-
-let mongoConnected = false;
-
-/*
-|--------------------------------------------------------------------------
-| Connect MongoDB
-|--------------------------------------------------------------------------
-*/
+    mongoose.model("Session", schema);
 
 async function connectMongo() {
-    if (!MONGODB_URI) {
-        console.log("[MONGO] No MONGODB_URI/MONGO_URI configured");
-        return false;
+    if (!MONGO_URI) {
+        console.log("[MONGO] No MongoDB URI");
+        return;
     }
 
     try {
-        if (mongoose.connection.readyState === 1) {
-            mongoConnected = true;
-            return true;
-        }
-
-        await mongoose.connect(MONGODB_URI);
-
-        mongoConnected = true;
-
+        await mongoose.connect(MONGO_URI);
         console.log("[MONGO] ✅ Connected");
-
-        return true;
-    } catch (error) {
-        mongoConnected = false;
-
-        console.error(
-            "[MONGO] ❌ Connection failed:",
-            error.message
-        );
-
-        return false;
+    } catch (e) {
+        console.error("[MONGO] ❌", e.message);
     }
 }
 
-/*
-|--------------------------------------------------------------------------
-| Helper - Main.js Manager
-|--------------------------------------------------------------------------
-*/
+/* =========================
+   MAIN.JS MANAGER
+========================= */
 
-function getBotManager() {
+function manager() {
     return global.ETIAS_BOT_MANAGER || null;
 }
 
-/*
-|--------------------------------------------------------------------------
-| Bot Image
-|--------------------------------------------------------------------------
-*/
-
-app.get("/bot-image", (req, res) => {
-    try {
-        if (fs.existsSync(BOT_IMAGE_PATH)) {
-            return res.sendFile(BOT_IMAGE_PATH);
-        }
-
-        if (fs.existsSync(BOT_IMAGE_PNG)) {
-            return res.sendFile(BOT_IMAGE_PNG);
-        }
-
-        return res.status(404).send("Bot image not found");
-    } catch (error) {
-        return res.status(500).send(error.message);
-    }
-});
-
-/*
-|--------------------------------------------------------------------------
-| Ping
-|--------------------------------------------------------------------------
-*/
-
-app.get("/ping", async (req, res) => {
-    let mongoCount = 0;
-
-    try {
-        if (
-            MONGODB_URI &&
-            mongoose.connection.readyState === 1
-        ) {
-            mongoCount = await SessionModel.countDocuments();
-        }
-    } catch {}
-
-    const manager = getBotManager();
-
-    let totalBots = 0;
-
-    try {
-        if (manager && typeof manager.getSessions === "function") {
-            const sessions = await Promise.resolve(
-                manager.getSessions()
-            );
-
-            totalBots = Array.isArray(sessions)
-                ? sessions.length
-                : 0;
-        }
-    } catch {}
-
-    res.json({
-        status: "online",
-        bot: BOT_NAME,
-        version: VERSION,
-
-        uptime: `${Math.floor(process.uptime() / 60)}m ${Math.floor(
-            process.uptime() % 60
-        )}s`,
-
-        uptime_seconds: process.uptime(),
-
-        total_bots: totalBots,
-
-        total_users_db: mongoCount,
-
-        mongo_connected:
-            mongoose.connection.readyState === 1,
-
-        pairing_site: PAIRING_SITE,
-
-        platform: process.platform,
-
-        node: process.version,
-
-        timestamp: new Date().toISOString()
-    });
-});
-
-/*
-|--------------------------------------------------------------------------
-| Current Session
-|--------------------------------------------------------------------------
-*/
-
-app.get("/session", async (req, res) => {
-    try {
-        const manager = getBotManager();
-
-        if (
-            manager &&
-            typeof manager.getSessions === "function"
-        ) {
-            const sessions = await Promise.resolve(
-                manager.getSessions()
-            );
-
-            return res.json({
-                exists: Array.isArray(sessions)
-                    ? sessions.length > 0
-                    : false,
-
-                sessions: Array.isArray(sessions)
-                    ? sessions
-                    : [],
-
-                pairing_site: PAIRING_SITE
-            });
-        }
-
-        return res.json({
-            exists: false,
-            sessions: [],
-            pairing_site: PAIRING_SITE,
-            message: "Bot manager not loaded"
-        });
-    } catch (error) {
-        return res.status(500).json({
-            exists: false,
-            error: error.message
-        });
-    }
-});
-
-/*
-|--------------------------------------------------------------------------
-| GET ALL BOTS
-|--------------------------------------------------------------------------
-*/
-
-app.get("/bots", async (req, res) => {
-    try {
-        const manager = getBotManager();
-
-        if (
-            manager &&
-            typeof manager.getSessions === "function"
-        ) {
-            const sessions = await Promise.resolve(
-                manager.getSessions()
-            );
-
-            return res.json({
-                total: Array.isArray(sessions)
-                    ? sessions.length
-                    : 0,
-
-                pairing_site: PAIRING_SITE,
-
-                sessions: Array.isArray(sessions)
-                    ? sessions
-                    : []
-            });
-        }
-
-        /*
-         * Mongo fallback
-         */
-
-        if (
-            MONGODB_URI &&
-            mongoose.connection.readyState === 1
-        ) {
-            const sessions = await SessionModel
-                .find({})
-                .select(
-                    "userId sessionId phone connected status mode days expireAt createdAt lastSeen"
-                )
-                .lean();
-
-            return res.json({
-                total: sessions.length,
-                pairing_site: PAIRING_SITE,
-                sessions
-            });
-        }
-
-        /*
-         * Local fallback
-         */
-
-        let sessions = {};
-
-        if (fs.existsSync(MULTI_FILE)) {
-            try {
-                sessions = JSON.parse(
-                    fs.readFileSync(MULTI_FILE, "utf8")
-                );
-            } catch {
-                sessions = {};
-            }
-        }
-
-        const list = Object.keys(sessions).map((id) => ({
-            userId: id,
-            sessionId: sessions[id]
-        }));
-
-        return res.json({
-            total: list.length,
-            pairing_site: PAIRING_SITE,
-            sessions: list
-        });
-    } catch (error) {
-        return res.status(500).json({
-            error: error.message
-        });
-    }
-});
-
-/*
-|--------------------------------------------------------------------------
-| DEPLOY / PAIR NEW BOT
-|--------------------------------------------------------------------------
-|
-| Example:
-|
-| POST /deploy
-|
-| {
-|   "phone": "2637XXXXXXXX"
-| }
-|
-|--------------------------------------------------------------------------
-*/
+/* =========================
+   DEPLOY
+========================= */
 
 app.post("/deploy", async (req, res) => {
     try {
+        const sessionId = String(
+            req.body.sessionId || ""
+        ).trim();
+
         const phone = String(
             req.body.phone ||
             req.body.number ||
             ""
         ).replace(/\D/g, "");
 
+        const days = Math.max(
+            1,
+            Number(req.body.days || req.body.duration || 30)
+        );
+
+        if (!sessionId) {
+            return res.status(400).json({
+                success: false,
+                error: "Session ID is required"
+            });
+        }
+
         if (!phone) {
             return res.status(400).json({
                 success: false,
-                error: "Phone number is required"
+                error: "User number is required"
             });
         }
 
-        const manager = getBotManager();
+        const bot = manager();
 
-        if (!manager) {
+        if (!bot || typeof bot.deploy !== "function") {
             return res.status(503).json({
                 success: false,
-                error:
-                    "Bot manager is not loaded. Start main.js first."
-            });
-        }
-
-        if (
-            typeof manager.deploy !== "function"
-        ) {
-            return res.status(500).json({
-                success: false,
-                error:
-                    "Bot manager does not support deployment"
+                error: "main.js bot manager is not running"
             });
         }
 
         console.log(
-            `[DEPLOY] New pairing request for +${phone}`
+            `[DEPLOY] ${sessionId} -> +${phone} (${days} days)`
         );
 
-        const result = await manager.deploy({
-            phone
+        const result = await bot.deploy({
+            sessionId,
+            phone,
+            days
         });
 
         return res.json({
             success: true,
-
             bot: BOT_NAME,
-
-            pairing_site: PAIRING_SITE,
-
+            sessionId,
+            phone,
+            days,
             ...result
         });
-    } catch (error) {
-        console.error(
-            "[DEPLOY] Error:",
-            error
-        );
 
-        return res.status(500).json({
+    } catch (e) {
+        console.error("[DEPLOY]", e);
+
+        res.status(500).json({
             success: false,
-            error: error.message
+            error: e.message
         });
     }
 });
 
-/*
-|--------------------------------------------------------------------------
-| GET DEPLOYMENT
-|--------------------------------------------------------------------------
-*/
+/* =========================
+   ALL BOTS
+========================= */
+
+app.get("/bots", async (req, res) => {
+    try {
+        const bot = manager();
+
+        if (bot && typeof bot.getSessions === "function") {
+            const sessions = await bot.getSessions();
+
+            return res.json({
+                success: true,
+                total: sessions.length,
+                sessions
+            });
+        }
+
+        const sessions = await Session.find({}).lean();
+
+        res.json({
+            success: true,
+            total: sessions.length,
+            sessions
+        });
+
+    } catch (e) {
+        res.status(500).json({
+            success: false,
+            error: e.message
+        });
+    }
+});
+
+/* =========================
+   SINGLE BOT
+========================= */
 
 app.get("/deploy/:sessionId", async (req, res) => {
     try {
-        const manager = getBotManager();
+        const bot = manager();
 
-        if (
-            manager &&
-            typeof manager.getSession === "function"
-        ) {
-            const session =
-                await Promise.resolve(
-                    manager.getSession(
-                        req.params.sessionId
-                    )
-                );
+        if (bot && typeof bot.getSession === "function") {
+            const session = await bot.getSession(
+                req.params.sessionId
+            );
 
-            if (!session) {
-                return res.status(404).json({
-                    success: false,
-                    error: "Session not found"
+            if (session) {
+                return res.json({
+                    success: true,
+                    session
                 });
             }
+        }
 
-            return res.json({
-                success: true,
-                session
+        const session = await Session.findOne({
+            sessionId: req.params.sessionId
+        }).lean();
+
+        if (!session) {
+            return res.status(404).json({
+                success: false,
+                error: "Session not found"
             });
         }
 
-        return res.status(503).json({
-            success: false,
-            error: "Bot manager unavailable"
+        res.json({
+            success: true,
+            session
         });
-    } catch (error) {
-        return res.status(500).json({
+
+    } catch (e) {
+        res.status(500).json({
             success: false,
-            error: error.message
+            error: e.message
         });
     }
 });
 
-/*
-|--------------------------------------------------------------------------
-| LIVE LOGS
-|--------------------------------------------------------------------------
-*/
+/* =========================
+   LIVE LOGS
+========================= */
 
 app.get("/logs/:sessionId", async (req, res) => {
     try {
-        const manager = getBotManager();
+        const bot = manager();
 
-        if (
-            manager &&
-            typeof manager.getLogs === "function"
-        ) {
-            const logs = await Promise.resolve(
-                manager.getLogs(
-                    req.params.sessionId
-                )
-            );
-
+        if (!bot || typeof bot.getLogs !== "function") {
             return res.json({
                 success: true,
-                sessionId: req.params.sessionId,
-                logs: Array.isArray(logs)
-                    ? logs
-                    : []
+                logs: []
             });
         }
 
-        return res.status(503).json({
-            success: false,
-            error: "Log manager unavailable"
-        });
-    } catch (error) {
-        return res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-/*
-|--------------------------------------------------------------------------
-| RESTART BOT
-|--------------------------------------------------------------------------
-*/
-
-app.post("/restart/:sessionId", async (req, res) => {
-    try {
-        const manager = getBotManager();
-
-        if (
-            !manager ||
-            typeof manager.restart !== "function"
-        ) {
-            return res.status(503).json({
-                success: false,
-                error: "Restart manager unavailable"
-            });
-        }
-
-        const result = await manager.restart(
+        const logs = await bot.getLogs(
             req.params.sessionId
         );
 
-        return res.json({
+        res.json({
             success: true,
-            result
+            sessionId: req.params.sessionId,
+            logs: logs || []
         });
-    } catch (error) {
-        return res.status(500).json({
+
+    } catch (e) {
+        res.status(500).json({
             success: false,
-            error: error.message
+            error: e.message
         });
     }
 });
 
-/*
-|--------------------------------------------------------------------------
-| STOP BOT
-|--------------------------------------------------------------------------
-*/
-
-app.post("/stop/:sessionId", async (req, res) => {
-    try {
-        const manager = getBotManager();
-
-        if (
-            !manager ||
-            typeof manager.stop !== "function"
-        ) {
-            return res.status(503).json({
-                success: false,
-                error: "Stop manager unavailable"
-            });
-        }
-
-        const result = await manager.stop(
-            req.params.sessionId
-        );
-
-        return res.json({
-            success: true,
-            result
-        });
-    } catch (error) {
-        return res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-});
-
-/*
-|--------------------------------------------------------------------------
-| REMOVE BOT
-|--------------------------------------------------------------------------
-*/
+/* =========================
+   DELETE BOT
+========================= */
 
 app.delete("/bots/:sessionId", async (req, res) => {
     try {
-        const manager = getBotManager();
+        const bot = manager();
 
-        if (
-            !manager ||
-            typeof manager.remove !== "function"
-        ) {
+        if (!bot || typeof bot.remove !== "function") {
             return res.status(503).json({
                 success: false,
-                error: "Remove manager unavailable"
+                error: "Bot manager unavailable"
             });
         }
 
-        const result = await manager.remove(
+        const result = await bot.remove(
             req.params.sessionId
         );
 
-        return res.json({
+        await Session.deleteOne({
+            sessionId: req.params.sessionId
+        });
+
+        res.json({
             success: true,
             result
         });
-    } catch (error) {
-        return res.status(500).json({
+
+    } catch (e) {
+        res.status(500).json({
             success: false,
-            error: error.message
+            error: e.message
         });
     }
 });
 
-/*
-|--------------------------------------------------------------------------
-| OLD /add SESSION COMPATIBILITY
-|--------------------------------------------------------------------------
-*/
+/* =========================
+   RENEW
+========================= */
 
-app.get("/add", async (req, res) => {
-    const sid = req.query.session;
-
-    if (!sid) {
-        return res.send(`
-            <h3>ETIAS-MINI-BOT</h3>
-            <p>Use the pairing site to create a new session:</p>
-            <a href="${PAIRING_SITE}" target="_blank">
-                ${PAIRING_SITE}
-            </a>
-        `);
-    }
-
+app.post("/renew/:sessionId", async (req, res) => {
     try {
-        const cleanSession = String(sid).trim();
-
-        let userId =
-            "user_" + Date.now();
-
-        /*
-         * Try to decode old session format.
-         */
-
-        try {
-            const b64 =
-                cleanSession.includes("~")
-                    ? cleanSession
-                        .split("~")
-                        .pop()
-                    : cleanSession;
-
-            const decoded = Buffer
-                .from(b64, "base64")
-                .toString("utf8");
-
-            if (
-                decoded.startsWith("{") &&
-                decoded.endsWith("}")
-            ) {
-                const json =
-                    JSON.parse(decoded);
-
-                userId =
-                    json.me?.id
-                        ?.split(":")[0] ||
-                    userId;
-            }
-        } catch {}
-
-        /*
-         * Save legacy session record.
-         */
-
-        let db = {};
-
-        if (fs.existsSync(MULTI_FILE)) {
-            try {
-                db = JSON.parse(
-                    fs.readFileSync(
-                        MULTI_FILE,
-                        "utf8"
-                    )
-                );
-            } catch {
-                db = {};
-            }
-        }
-
-        db[userId] = {
-            sessionId: cleanSession,
-            updatedAt:
-                new Date().toISOString()
-        };
-
-        fs.writeFileSync(
-            MULTI_FILE,
-            JSON.stringify(
-                db,
-                null,
-                2
-            )
+        const days = Math.max(
+            1,
+            Number(req.body.days || 30)
         );
 
-        /*
-         * MongoDB
-         */
+        const session = await Session.findOne({
+            sessionId: req.params.sessionId
+        });
 
-        if (
-            MONGODB_URI &&
-            mongoose.connection.readyState === 1
-        ) {
-            await SessionModel.findOneAndUpdate(
-                {
-                    userId
-                },
-                {
-                    sessionId: cleanSession,
-                    phone: userId,
-                    connected: false,
-                    status: "saved"
-                },
-                {
-                    upsert: true,
-                    new: true
-                }
+        if (!session) {
+            return res.status(404).json({
+                success: false,
+                error: "Session not found"
+            });
+        }
+
+        const now = new Date();
+
+        const base =
+            session.expireAt &&
+            session.expireAt > now
+                ? session.expireAt
+                : now;
+
+        session.days =
+            Number(session.days || 0) + days;
+
+        session.expireAt =
+            new Date(
+                base.getTime() +
+                days * 86400000
             );
-        }
 
-        return res.send(`
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<title>${BOT_NAME}</title>
-<meta name="viewport"
-content="width=device-width,initial-scale=1">
-<style>
-body{
-    background:#080808;
-    color:white;
-    font-family:Arial,sans-serif;
-    display:flex;
-    justify-content:center;
-    align-items:center;
-    min-height:100vh;
-}
-.card{
-    max-width:500px;
-    width:90%;
-    background:#151515;
-    border:1px solid #333;
-    border-radius:20px;
-    padding:30px;
-    text-align:center;
-}
-.success{
-    color:#25D366;
-    font-size:20px;
-    margin-bottom:15px;
-}
-a{
-    display:inline-block;
-    margin-top:20px;
-    padding:12px 20px;
-    border-radius:10px;
-    background:#25D366;
-    color:#000;
-    text-decoration:none;
-    font-weight:bold;
-}
-</style>
-</head>
-<body>
-<div class="card">
-<div class="success">✅ SESSION SAVED</div>
-<p>User: ${userId}</p>
-<p>The new multi-session manager will handle reconnection.</p>
-<a href="${PAIRING_SITE}">
-PAIR NEW BOT
-</a>
-</div>
-</body>
-</html>
-        `);
-    } catch (error) {
-        return res.status(400).send(
-            "❌ Invalid SESSION: " +
-            error.message
-        );
+        await session.save();
+
+        res.json({
+            success: true,
+            sessionId: session.sessionId,
+            daysAdded: days,
+            daysTotal: session.days,
+            expireAt: session.expireAt
+        });
+
+    } catch (e) {
+        res.status(500).json({
+            success: false,
+            error: e.message
+        });
     }
 });
 
-/*
-|--------------------------------------------------------------------------
-| HOME PAGE
-|--------------------------------------------------------------------------
-*/
+/* =========================
+   PING
+========================= */
 
-app.get("/", async (req, res) => {
-    let commandsCount = 0;
+app.get("/ping", (req, res) => {
+    res.json({
+        status: "online",
+        bot: BOT_NAME,
+        uptime: process.uptime(),
+        mongo:
+            mongoose.connection.readyState === 1,
+        pairing_site: PAIRING_SITE
+    });
+});
 
-    try {
-        const commandPath =
-            path.join(__dirname, "commands");
+/* =========================
+   DASHBOARD
+========================= */
 
-        if (fs.existsSync(commandPath)) {
-            commandsCount =
-                fs.readdirSync(commandPath)
-                    .filter(
-                        (file) =>
-                            file.endsWith(".js")
-                    )
-                    .length;
-        }
-    } catch {}
-
-    let mongoCount = 0;
-
-    try {
-        if (
-            MONGODB_URI &&
-            mongoose.connection.readyState === 1
-        ) {
-            mongoCount =
-                await SessionModel.countDocuments();
-        }
-    } catch {}
-
-    let totalBots = 0;
-
-    try {
-        const manager = getBotManager();
-
-        if (
-            manager &&
-            typeof manager.getSessions ===
-                "function"
-        ) {
-            const sessions =
-                await Promise.resolve(
-                    manager.getSessions()
-                );
-
-            if (Array.isArray(sessions)) {
-                totalBots = sessions.length;
-            }
-        }
-    } catch {}
-
-    const uptime =
-        process.uptime();
-
-    const hours =
-        Math.floor(uptime / 3600);
-
-    const mins =
-        Math.floor(
-            (uptime % 3600) / 60
-        );
-
-    const secs =
-        Math.floor(uptime % 60);
-
-    res.send(`
-<!DOCTYPE html>
+app.get("/", (req, res) => {
+    res.send(`<!DOCTYPE html>
 <html>
-
 <head>
-
 <meta charset="UTF-8">
-
-<meta
-name="viewport"
+<meta name="viewport"
 content="width=device-width,initial-scale=1">
 
-<title>
-${BOT_NAME} - Online
-</title>
+<title>${BOT_NAME} Dashboard</title>
 
 <style>
-
 *{
-    margin:0;
-    padding:0;
-    box-sizing:border-box;
+ box-sizing:border-box;
 }
 
 body{
+ margin:0;
+ background:#050505;
+ color:#fff;
+ font-family:Arial,sans-serif;
+ padding:20px;
+}
 
-    background:
-    radial-gradient(
-        circle at top,
-        #10251b,
-        #050505 60%
-    );
-
-    color:#fff;
-
-    font-family:
-    Arial,
-    "Segoe UI",
-    sans-serif;
-
-    min-height:100vh;
-
-    display:flex;
-
-    justify-content:center;
-
-    align-items:center;
-
-    padding:20px;
+.container{
+ max-width:1100px;
+ margin:auto;
 }
 
 .card{
-
-    width:100%;
-
-    max-width:500px;
-
-    background:
-    rgba(20,20,20,.95);
-
-    border:
-    1px solid #333;
-
-    border-radius:24px;
-
-    padding:30px;
-
-    text-align:center;
-
-    box-shadow:
-    0 20px 60px
-    rgba(0,0,0,.6);
-
-}
-
-img{
-
-    width:130px;
-
-    height:130px;
-
-    object-fit:cover;
-
-    border-radius:50%;
-
-    border:
-    4px solid #25D366;
-
-    margin-bottom:20px;
-
+ background:#111;
+ border:1px solid #292929;
+ border-radius:16px;
+ padding:20px;
+ margin-bottom:20px;
 }
 
 h1{
-
-    font-size:25px;
-
-    margin-bottom:8px;
-
+ color:#25D366;
 }
 
-.status{
-
-    display:inline-block;
-
-    padding:
-    7px 14px;
-
-    border-radius:30px;
-
-    color:#25D366;
-
-    background:
-    rgba(37,211,102,.1);
-
-    border:
-    1px solid #25D366;
-
-    font-size:12px;
-
-    margin-bottom:20px;
-
+input{
+ width:100%;
+ padding:13px;
+ margin:7px 0;
+ border-radius:9px;
+ border:1px solid #333;
+ background:#181818;
+ color:white;
 }
 
-.dot{
-
-    width:9px;
-
-    height:9px;
-
-    display:inline-block;
-
-    background:#25D366;
-
-    border-radius:50%;
-
-    margin-right:6px;
-
-    box-shadow:
-    0 0 12px #25D366;
-
-    animation:
-    blink 1.4s infinite;
-
+button{
+ padding:11px 16px;
+ border:0;
+ border-radius:8px;
+ cursor:pointer;
+ font-weight:bold;
+ margin:4px;
 }
 
-@keyframes blink{
-
-    0%,100%{
-        opacity:1;
-    }
-
-    50%{
-        opacity:.3;
-    }
-
+.deploy{
+ background:#25D366;
+ color:#000;
+ width:100%;
 }
 
-.info{
-
-    display:grid;
-
-    grid-template-columns:
-    1fr 1fr;
-
-    gap:10px;
-
-    margin:
-    20px 0;
-
+.delete{
+ background:#e53935;
+ color:white;
 }
 
-.info div{
-
-    background:#242424;
-
-    border:
-    1px solid #303030;
-
-    padding:12px;
-
-    border-radius:12px;
-
-    text-align:left;
-
+.renew{
+ background:#ffb300;
+ color:#000;
 }
 
-.info span{
-
-    display:block;
-
-    color:#888;
-
-    font-size:10px;
-
-    text-transform:uppercase;
-
-    margin-bottom:4px;
-
+.logs{
+ background:#000;
+ border:1px solid #222;
+ border-radius:10px;
+ padding:15px;
+ height:250px;
+ overflow:auto;
+ white-space:pre-wrap;
+ font-family:monospace;
+ font-size:12px;
 }
 
-.info b{
-
-    font-size:14px;
-
+table{
+ width:100%;
+ border-collapse:collapse;
+ font-size:12px;
 }
 
-.btn{
-
-    width:100%;
-
-    display:block;
-
-    padding:13px;
-
-    margin-top:10px;
-
-    border-radius:11px;
-
-    text-decoration:none;
-
-    font-weight:bold;
-
-    font-size:13px;
-
-    background:#25D366;
-
-    color:#000;
-
+th,td{
+ padding:10px;
+ border-bottom:1px solid #292929;
+ text-align:left;
 }
 
-.btn2{
-
-    background:#111;
-
-    border:
-    1px solid #333;
-
-    color:#fff;
-
+.online{
+ color:#25D366;
 }
 
-.footer{
-
-    color:#555;
-
-    font-size:11px;
-
-    margin-top:20px;
-
+.offline{
+ color:#ff5252;
 }
 
-.small{
-
-    color:#888;
-
-    font-size:12px;
-
-    margin-top:10px;
-
+@media(max-width:700px){
+ table{
+  display:block;
+  overflow-x:auto;
+ }
 }
-
 </style>
-
 </head>
 
 <body>
 
-<div class="card">
+<div class="container">
 
-<img
-src="/bot-image"
-onerror="
-this.style.display='none'
-"
+<div class="card">
+<h1>🤖 ${BOT_NAME}</h1>
+<p>Multi-Session Deployment Dashboard</p>
+
+<input
+ id="sessionId"
+ placeholder="Session ID"
 />
 
-<h1>
+<input
+ id="phone"
+ placeholder="User WhatsApp number e.g. 263778810589"
+/>
 
-<span class="dot"></span>
+<input
+ id="days"
+ type="number"
+ value="30"
+ min="1"
+ placeholder="Duration in days"
+/>
 
-${BOT_NAME}
+<button
+ class="deploy"
+ onclick="deployBot()">
+🚀 DEPLOY BOT
+</button>
 
-</h1>
-
-<div class="status">
-
-● ONLINE - ${VERSION}
-
+<p id="result"></p>
 </div>
 
-<div class="info">
+<div class="card">
+<h2>📡 Live Logs</h2>
 
-<div>
-
-<span>Uptime</span>
-
-<b>
-${hours}h ${mins}m ${secs}s
-</b>
-
-</div>
-
-<div>
-
-<span>Commands</span>
-
-<b>
-${commandsCount}
-</b>
-
-</div>
-
-<div>
-
-<span>Active Bots</span>
-
-<b>
-${totalBots}
-</b>
-
-</div>
-
-<div>
-
-<span>MongoDB</span>
-
-<b>
-${
-    mongoose.connection.readyState === 1
-        ? "CONNECTED"
-        : "OFFLINE"
-}
-</b>
-
-</div>
-
-<div>
-
-<span>Database Users</span>
-
-<b>
-${mongoCount}
-</b>
-
-</div>
-
-<div>
-
-<span>Platform</span>
-
-<b>
-${process.platform}
-</b>
-
-</div>
-
-</div>
-
-<a
-class="btn"
-href="${PAIRING_SITE}"
-target="_blank"
->
-
-🔗 PAIR NEW BOT
-
-</a>
-
-<a
-class="btn btn2"
-href="/bots"
->
-
-📋 VIEW ALL BOTS
-
-</a>
-
-<a
-class="btn btn2"
-href="/ping"
->
-
-📡 SERVER STATUS
-
-</a>
-
-<p class="small">
-
-WhatsApp Multi-Device<br>
-
-Automatic reconnect + MongoDB
-
+<p id="logStatus">
+Waiting for deployment...
 </p>
 
-<div class="footer">
+<div
+ id="logs"
+ class="logs">
+No logs yet.
+</div>
+</div>
 
-POWERED BY ETIAS-TECH © 2026
+<div class="card">
+
+<h2>👥 Deployed Users</h2>
+
+<table>
+
+<thead>
+<tr>
+<th>Phone</th>
+<th>Session ID</th>
+<th>Status</th>
+<th>Expires</th>
+<th>Actions</th>
+</tr>
+</thead>
+
+<tbody id="users">
+<tr>
+<td colspan="5">
+Loading...
+</td>
+</tr>
+</tbody>
+
+</table>
 
 </div>
 
 </div>
+
+<script>
+
+let currentSession = "";
+
+async function deployBot(){
+
+ const sessionId =
+ document.getElementById("sessionId").value.trim();
+
+ const phone =
+ document.getElementById("phone").value.trim();
+
+ const days =
+ document.getElementById("days").value;
+
+ if(!sessionId || !phone){
+   alert("Enter Session ID and user number");
+   return;
+ }
+
+ document.getElementById("result").innerText =
+   "🚀 Deploying...";
+
+ const res = await fetch("/deploy",{
+   method:"POST",
+   headers:{
+     "Content-Type":"application/json"
+   },
+   body:JSON.stringify({
+     sessionId,
+     phone,
+     days
+   })
+ });
+
+ const data = await res.json();
+
+ if(!data.success){
+   document.getElementById("result").innerText =
+     "❌ " + data.error;
+   return;
+ }
+
+ currentSession = sessionId;
+
+ document.getElementById("result").innerText =
+   "✅ Deployment started";
+
+ watchLogs();
+
+ loadBots();
+}
+
+async function watchLogs(){
+
+ if(!currentSession) return;
+
+ try{
+
+   const res =
+     await fetch(
+       "/logs/" +
+       encodeURIComponent(currentSession)
+     );
+
+   const data = await res.json();
+
+   document.getElementById("logs").innerText =
+     (data.logs || []).join("\\n");
+
+   document.getElementById("logs").scrollTop =
+     document.getElementById("logs").scrollHeight;
+
+   document.getElementById("logStatus").innerText =
+     "🟢 Live";
+
+ }catch(e){
+
+   document.getElementById("logStatus").innerText =
+     "🔴 Log connection error";
+ }
+
+ setTimeout(watchLogs,2000);
+}
+
+async function loadBots(){
+
+ try{
+
+   const res = await fetch("/bots");
+   const data = await res.json();
+
+   const tbody =
+     document.getElementById("users");
+
+   tbody.innerHTML = "";
+
+   (data.sessions || []).forEach(bot => {
+
+     const tr =
+       document.createElement("tr");
+
+     const status =
+       bot.connected
+       ? '<span class="online">● ONLINE</span>'
+       : '<span class="offline">● OFFLINE</span>';
+
+     tr.innerHTML = \`
+       <td>\${bot.phone || "-"}</td>
+       <td>\${bot.sessionId || "-"}</td>
+       <td>\${status}</td>
+       <td>\${bot.expireAt || "-"}</td>
+
+       <td>
+
+       <button
+       class="renew"
+       onclick="renewBot('\${bot.sessionId}')">
+       Renew
+       </button>
+
+       <button
+       class="delete"
+       onclick="deleteBot('\${bot.sessionId}')">
+       Delete
+       </button>
+
+       </td>
+     \`;
+
+     tbody.appendChild(tr);
+   });
+
+ }catch(e){
+   console.error(e);
+ }
+}
+
+async function renewBot(id){
+
+ const days =
+   prompt("How many days to add?", "30");
+
+ if(!days) return;
+
+ const res =
+   await fetch(
+     "/renew/" +
+     encodeURIComponent(id),
+     {
+       method:"POST",
+       headers:{
+         "Content-Type":"application/json"
+       },
+       body:JSON.stringify({days})
+     }
+   );
+
+ const data = await res.json();
+
+ alert(
+   data.success
+   ? "✅ Bot renewed"
+   : "❌ " + data.error
+ );
+
+ loadBots();
+}
+
+async function deleteBot(id){
+
+ if(!confirm(
+   "Delete this deployed bot?"
+ )) return;
+
+ const res =
+   await fetch(
+     "/bots/" +
+     encodeURIComponent(id),
+     {
+       method:"DELETE"
+     }
+   );
+
+ const data = await res.json();
+
+ alert(
+   data.success
+   ? "✅ Bot deleted"
+   : "❌ " + data.error
+ );
+
+ loadBots();
+}
+
+loadBots();
+
+setInterval(loadBots,5000);
+
+</script>
 
 </body>
-
-</html>
-    `);
+</html>`);
 });
 
-/*
-|--------------------------------------------------------------------------
-| 404
-|--------------------------------------------------------------------------
-*/
+/* =========================
+   404
+========================= */
 
-app.use((req, res) => {
+app.use((req,res)=>{
     res.status(404).json({
-        success: false,
-        error: "Route not found",
-        path: req.path
+        success:false,
+        error:"Route not found"
     });
 });
 
-/*
-|--------------------------------------------------------------------------
-| Error Handler
-|--------------------------------------------------------------------------
-*/
+/* =========================
+   START
+========================= */
 
-app.use((err, req, res, next) => {
-    console.error(
-        "[SERVER ERROR]",
-        err
-    );
-
-    res.status(500).json({
-        success: false,
-        error: err.message
-    });
-});
-
-/*
-|--------------------------------------------------------------------------
-| Start Server
-|--------------------------------------------------------------------------
-|
-| main.js can require this file without starting a second server.
-|--------------------------------------------------------------------------
-*/
-
-async function startServer() {
+async function startServer(){
 
     await connectMongo();
 
-    return new Promise((resolve) => {
+    if(app.locals.server)
+        return app.locals.server;
 
-        if (app.locals.server) {
-            return resolve(
-                app.locals.server
+    app.locals.server =
+        app.listen(PORT,()=>{
+            console.log(
+                `[SERVER] ${BOT_NAME} running on ${PORT}`
             );
-        }
 
-        const server =
-            app.listen(
-                PORT,
-                () => {
-
-                    app.locals.server =
-                        server;
-
-                    console.log(
-                        `[SERVER] ${BOT_NAME} running on port ${PORT}`
-                    );
-
-                    console.log(
-                        `[SERVER] Pairing site: ${PAIRING_SITE}`
-                    );
-
-                    resolve(server);
-                }
+            console.log(
+                `[SERVER] Dashboard: http://localhost:${PORT}`
             );
-    });
+
+            console.log(
+                `[SERVER] Pairing site: ${PAIRING_SITE}`
+            );
+        });
+
+    return app.locals.server;
 }
 
-/*
-|--------------------------------------------------------------------------
-| Direct execution
-|--------------------------------------------------------------------------
-*/
+if(require.main === module){
 
-if (require.main === module) {
-    startServer().catch((error) => {
-
-        console.error(
-            "[SERVER] Startup failed:",
-            error
-        );
-
+    startServer().catch(e=>{
+        console.error(e);
         process.exit(1);
     });
 }
 
-/*
-|--------------------------------------------------------------------------
-| Exports
-|--------------------------------------------------------------------------
-*/
-
 module.exports = app;
-
-module.exports.app = app;
 module.exports.startServer = startServer;
 module.exports.connectMongo = connectMongo;
-module.exports.SessionModel = SessionModel;
-module.exports.PAIRING_SITE = PAIRING_SITE;
+module.exports.SessionModel = Session;
