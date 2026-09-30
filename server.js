@@ -6,27 +6,6 @@ const express = require("express");
 const path = require("path");
 const fs = require("fs");
 const fsp = fs.promises;
-const crypto = require("crypto");
-const pino = require("pino");
-const QRCode = require("qrcode");
-
-const {
-    default: makeWASocket,
-    useMultiFileAuthState,
-    DisconnectReason,
-    Browsers,
-    makeCacheableSignalKeyStore
-} = require("@whiskeysockets/baileys");
-
-const {
-    createPairing,
-    getPairing,
-    updatePairing,
-    getAllPairings,
-    generateUserId,
-    addDeployedUser,
-    loadDeployed
-} = require("./id");
 
 const app = express();
 
@@ -34,2686 +13,974 @@ const app = express();
    CONFIG
 ========================================================= */
 
-const PORT =
-    process.env.PORT || 3000;
+const PORT = Number(process.env.PORT || 3000);
 
-const BOT_NAME =
-    process.env.BOT_NAME ||
-    "ETIAS-MINI-BOT";
+const ROOT = __dirname;
+const DATA_DIR = path.join(ROOT, "data");
+const LOG_DIR = path.join(ROOT, "logs");
 
-const ROOT =
-    __dirname;
+const DEPLOYED_FILE = path.join(DATA_DIR, "deployed.json");
+const MULTI_SESSION_FILE = path.join(DATA_DIR, "multi_sessions.json");
 
-const AUTH_DIR =
-    path.join(ROOT, "auth");
+const PAIRING_SERVER_URL = (
+    process.env.PAIRING_SERVER_URL ||
+    "https://etias-mini-bot-pair.onrender.com"
+).replace(/\/+$/, "");
 
-const DATA_DIR =
-    path.join(ROOT, "data");
+const SESSION_PREFIX = "ETIAS-MINI-BOT~";
 
-const MEDIA_DIR =
-    path.join(ROOT, "media");
-
-const TEMP_AUTH_DIR =
-    path.join(ROOT, "temp_auth");
-
-/*
- * Session format:
- *
- * ETIAS-MINI-BOT~12345678
- *
- * Exactly 8 digits after the ~
- */
-const SESSION_PREFIX =
-    "ETIAS-MINI-BOT~";
-
-const SESSION_REGEX =
-    /^ETIAS-MINI-BOT~\d{8}$/;
+const DEFAULT_DAYS = Number(process.env.DEFAULT_DAYS || 30);
+const MAX_DAYS = Number(process.env.MAX_DAYS || 365);
 
 /* =========================================================
-   LOGGER
+   DIRECTORIES
 ========================================================= */
 
-const logger = pino({
-    level:
-        process.env.LOG_LEVEL ||
-        "silent"
-});
+for (const dir of [DATA_DIR, LOG_DIR]) {
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+    }
+}
 
 /* =========================================================
    EXPRESS
 ========================================================= */
 
-app.use(
-    express.json({
-        limit: "10mb"
-    })
-);
+app.disable("x-powered-by");
 
-app.use(
-    express.urlencoded({
-        extended: true,
-        limit: "10mb"
-    })
-);
+app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 
-app.use(
-    express.static(ROOT)
-);
-
-/* =========================================================
-   RUNTIME STORES
-========================================================= */
-
-/*
- * pairingId -> WhatsApp socket
- */
-const sockets = new Map();
-
-/*
- * pairingId -> reconnect lock
- */
-const reconnecting = new Set();
-
-/*
- * sessionId -> deployment information
- *
- * IMPORTANT:
- * This is also persisted to data/sessions.json
- * so a restart does not immediately destroy the mapping.
- */
-const sessions = new Map();
-
-/* =========================================================
-   DIRECTORY SETUP
-========================================================= */
-
-async function ensureDirectories() {
-
-    await fsp.mkdir(
-        AUTH_DIR,
-        {
-            recursive: true
-        }
+app.use((req, res, next) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader(
+        "Access-Control-Allow-Methods",
+        "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+    );
+    res.setHeader(
+        "Access-Control-Allow-Headers",
+        "Content-Type, Authorization, X-API-Key"
     );
 
-    await fsp.mkdir(
-        DATA_DIR,
-        {
-            recursive: true
-        }
-    );
-
-    await fsp.mkdir(
-        MEDIA_DIR,
-        {
-            recursive: true
-        }
-    );
-
-    await fsp.mkdir(
-        TEMP_AUTH_DIR,
-        {
-            recursive: true
-        }
-    );
-}
-
-/* =========================================================
-   SESSION DATABASE
-========================================================= */
-
-const SESSION_FILE =
-    path.join(
-        DATA_DIR,
-        "sessions.json"
-    );
-
-async function loadSessions() {
-
-    try {
-
-        if (
-            !fs.existsSync(
-                SESSION_FILE
-            )
-        ) {
-            return;
-        }
-
-        const raw =
-            await fsp.readFile(
-                SESSION_FILE,
-                "utf8"
-            );
-
-        if (!raw.trim()) {
-            return;
-        }
-
-        const data =
-            JSON.parse(raw);
-
-        if (
-            !Array.isArray(data)
-        ) {
-            return;
-        }
-
-        sessions.clear();
-
-        for (
-            const item of data
-        ) {
-
-            if (
-                item &&
-                item.sessionId
-            ) {
-                sessions.set(
-                    item.sessionId,
-                    item
-                );
-            }
-        }
-
-        console.log(
-            `[SESSION DB] Loaded ${sessions.size} sessions`
-        );
-
-    } catch (error) {
-
-        console.error(
-            "[SESSION DB] Load error:",
-            error.message
-        );
+    if (req.method === "OPTIONS") {
+        return res.sendStatus(204);
     }
-}
 
-async function saveSessions() {
-
-    try {
-
-        const data =
-            Array.from(
-                sessions.values()
-            );
-
-        await fsp.writeFile(
-            SESSION_FILE,
-            JSON.stringify(
-                data,
-                null,
-                2
-            )
-        );
-
-    } catch (error) {
-
-        console.error(
-            "[SESSION DB] Save error:",
-            error.message
-        );
-    }
-}
+    next();
+});
 
 /* =========================================================
    HELPERS
 ========================================================= */
 
-function sleep(ms) {
-
-    return new Promise(
-        resolve =>
-            setTimeout(
-                resolve,
-                ms
-            )
-    );
+function normalizePhone(value) {
+    return String(value || "")
+        .replace(/[^\d]/g, "")
+        .replace(/^0+/, "");
 }
 
-function cleanNumber(number) {
-
-    return String(
-        number || ""
-    )
-        .replace(
-            /\D/g,
-            ""
-        );
+function normalizeSessionId(value) {
+    return String(value || "").trim().toUpperCase();
 }
 
-function normalizeJid(jid) {
+function isValidSessionId(sessionId) {
+    return new RegExp(
+        "^" +
+            SESSION_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") +
+            "\\d{8}$",
+        "i"
+    ).test(String(sessionId || "").trim());
+}
 
-    if (!jid) {
-        return null;
+function safeDays(value) {
+    const days = Number(value);
+
+    if (!Number.isFinite(days)) {
+        return DEFAULT_DAYS;
     }
 
-    return String(jid)
-        .trim()
-        .replace(
-            /:\d+(?=@)/,
-            ""
-        );
+    return Math.max(1, Math.min(Math.floor(days), MAX_DAYS));
 }
 
-function numberFromJid(jid) {
+function now() {
+    return new Date().toISOString();
+}
 
-    const normalized =
-        normalizeJid(jid);
+function getExpireDate(days) {
+    return new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+}
 
-    if (!normalized) {
-        return "";
+async function ensureJsonFile(file, fallback) {
+    try {
+        await fsp.access(file);
+    } catch {
+        await fsp.writeFile(
+            file,
+            JSON.stringify(fallback, null, 2),
+            "utf8"
+        );
     }
-
-    return normalized
-        .split("@")[0]
-        .replace(
-            /\D/g,
-            ""
-        );
 }
 
-/* =========================================================
-   SESSION ID
-========================================================= */
+async function readJson(file, fallback = []) {
+    try {
+        const raw = await fsp.readFile(file, "utf8");
 
-function generateSessionId() {
-
-    const number =
-        crypto.randomInt(
-            0,
-            100000000
-        );
-
-    return (
-        SESSION_PREFIX +
-        String(number)
-            .padStart(
-                8,
-                "0"
-            )
-    );
-}
-
-function isValidSessionId(
-    sessionId
-) {
-
-    return SESSION_REGEX.test(
-        String(
-            sessionId || ""
-        ).trim()
-    );
-}
-
-function createUniqueSessionId() {
-
-    let sessionId;
-
-    do {
-
-        sessionId =
-            generateSessionId();
-
-    } while (
-        sessions.has(
-            sessionId
-        )
-    );
-
-    return sessionId;
-}
-
-/* =========================================================
-   DISCONNECT HELPERS
-========================================================= */
-
-function getDisconnectCode(
-    lastDisconnect
-) {
-
-    return (
-        lastDisconnect?.error
-            ?.output?.statusCode ||
-
-        lastDisconnect?.error
-            ?.data?.statusCode ||
-
-        lastDisconnect?.error
-            ?.statusCode ||
-
-        null
-    );
-}
-
-function isLoggedOut(code) {
-
-    return (
-        code ===
-        DisconnectReason.loggedOut
-    );
-}
-
-function isBadSession(code) {
-
-    return (
-        code ===
-        DisconnectReason.badSession
-    );
-}
-
-function isRestartRequired(code) {
-
-    return (
-        code ===
-        DisconnectReason.restartRequired
-    );
-}
-
-/* =========================================================
-   FIND SESSION
-========================================================= */
-
-function getSessionById(
-    sessionId
-) {
-
-    return sessions.get(
-        String(
-            sessionId || ""
-        ).trim()
-    );
-}
-
-/* =========================================================
-   SAVE SESSION
-========================================================= */
-
-async function saveSession(
-    data
-) {
-
-    sessions.set(
-        data.sessionId,
-        {
-            ...data,
-            updatedAt:
-                new Date().toISOString()
+        if (!raw.trim()) {
+            return fallback;
         }
-    );
 
-    await saveSessions();
+        return JSON.parse(raw);
+    } catch {
+        return fallback;
+    }
 }
 
-/* =========================================================
-   SEND SESSION ID
-========================================================= */
+async function writeJson(file, data) {
+    const temp = `${file}.tmp`;
 
-async function sendSessionId(
-    sock,
-    sessionId,
-    targetJid
-) {
-
-    if (!sock) {
-        throw new Error(
-            "WhatsApp socket unavailable"
-        );
-    }
-
-    if (!sessionId) {
-        throw new Error(
-            "Session ID unavailable"
-        );
-    }
-
-    if (!targetJid) {
-        throw new Error(
-            "Target WhatsApp JID unavailable"
-        );
-    }
-
-    const message =
-        "╭━━━〔 ETIAS-MINI-BOT 〕━━━╮\n" +
-        "┃\n" +
-        "┃ ✅ PAIRING SUCCESSFUL\n" +
-        "┃\n" +
-        "┃ YOUR SESSION ID\n" +
-        "┃\n" +
-        `┃ ${sessionId}\n` +
-        "┃\n" +
-        "┃ Copy the Session ID above\n" +
-        "┃ and paste it on the\n" +
-        "┃ deployment page.\n" +
-        "┃\n" +
-        "┃ Do NOT share this ID.\n" +
-        "┃\n" +
-        "╰━━━━━━━━━━━━━━━━━━━━━━╯";
-
-    await sock.sendMessage(
-        targetJid,
-        {
-            text:
-                message
-        }
+    await fsp.writeFile(
+        temp,
+        JSON.stringify(data, null, 2),
+        "utf8"
     );
 
-    console.log(
-        `[SESSION] Session ID sent: ${sessionId}`
-    );
+    await fsp.rename(temp, file);
 }
 
-/* =========================================================
-   SAVE SUCCESSFUL DEPLOYMENT
-========================================================= */
-
-async function saveSuccessfulDeployment(
-    session,
-    days
-) {
-
-    const now =
-        new Date();
-
-    const duration =
-        Math.max(
-            1,
-            Number(days || 30)
-        );
-
-    const expireAt =
-        new Date(
-            now.getTime() +
-            duration *
-                86400000
-        );
-
-    session.status =
-        "deployed";
-
-    session.connected =
-        true;
-
-    session.days =
-        duration;
-
-    session.expireAt =
-        expireAt.toISOString();
-
-    session.deployedAt =
-        now.toISOString();
-
-    session.updatedAt =
-        now.toISOString();
-
-    await saveSession(
-        session
-    );
-
-    updatePairing(
-        session.pairingId,
-        {
-            status:
-                "deployed",
-
-            connected:
-                true,
-
-            sent:
-                true,
-
-            jid:
-                session.jid,
-
-            authFolder:
-                session.authFolder,
-
-            sessionId:
-                session.sessionId,
-
-            deployedAt:
-                session.deployedAt,
-
-            days:
-                duration,
-
-            expireAt:
-                session.expireAt
-        }
-    );
+async function appendLog(message, meta = null) {
+    const line =
+        `[${now()}] ${message}` +
+        (meta ? ` ${JSON.stringify(meta)}` : "") +
+        "\n";
 
     try {
+        await fsp.appendFile(
+            path.join(LOG_DIR, "server.log"),
+            line,
+            "utf8"
+        );
+    } catch {
+        // Logging must never crash the API.
+    }
+}
 
-        await addDeployedUser({
+function jsonError(res, status, message, extra = {}) {
+    return res.status(status).json({
+        success: false,
+        error: message,
+        ...extra
+    });
+}
 
-            id:
-                generateUserId(),
+function manager() {
+    return global.ETIAS_BOT_MANAGER || null;
+}
 
-            pairingId:
-                session.pairingId,
+/* =========================================================
+   INITIAL DATA
+========================================================= */
 
-            sessionId:
-                session.sessionId,
+ensureJsonFile(DEPLOYED_FILE, []).catch(() => {});
+ensureJsonFile(MULTI_SESSION_FILE, []).catch(() => {});
 
-            number:
-                session.number,
+/* =========================================================
+   BASIC ROUTES
+========================================================= */
 
-            jid:
-                session.jid,
+app.get("/", async (req, res) => {
+    res.json({
+        success: true,
+        name: "ETIAS-MINI-BOT Deployment Server",
+        status: "online",
+        version: "3.0.0",
+        service: "bot",
+        pairingServer: PAIRING_SERVER_URL,
+        pairingHandledBy: "ETIAS pairing server",
+        pairingCodeGeneration: false,
+        sessionPrefix: SESSION_PREFIX,
+        time: now()
+    });
+});
 
-            authFolder:
-                session.authFolder,
+app.get("/health", async (req, res) => {
+    const botManager = manager();
 
-            status:
-                "deployed",
+    res.json({
+        success: true,
+        status: "online",
+        service: "deployment-server",
+        botManager: !!botManager,
+        pairingServer: PAIRING_SERVER_URL,
+        time: now()
+    });
+});
 
-            connected:
-                true,
+app.get("/api/health", async (req, res) => {
+    const botManager = manager();
 
-            sent:
-                true,
+    res.json({
+        success: true,
+        status: "online",
+        botManager: !!botManager,
+        time: now()
+    });
+});
 
-            days:
-                duration,
+/* =========================================================
+   PAIRING SERVER REQUEST
+========================================================= */
 
-            expireAt:
-                session.expireAt,
+async function callPairingServer(endpoint, options = {}) {
+    const url =
+        `${PAIRING_SERVER_URL}${endpoint.startsWith("/") ? endpoint : "/" + endpoint}`;
 
-            deployedAt:
-                session.deployedAt,
+    const controller = new AbortController();
 
-            createdAt:
-                session.createdAt ||
-                now.toISOString()
+    const timeout = setTimeout(() => {
+        controller.abort();
+    }, 20000);
+
+    try {
+        const response = await fetch(url, {
+            ...options,
+            signal: controller.signal,
+            headers: {
+                Accept: "application/json",
+                "Content-Type": "application/json",
+                ...(options.headers || {})
+            }
         });
 
-    } catch (error) {
+        const text = await response.text();
 
-        console.error(
-            "[DEPLOYMENT DB]",
-            error.message
-        );
+        let data;
+
+        try {
+            data = text ? JSON.parse(text) : {};
+        } catch {
+            data = {
+                success: false,
+                error: text || "Invalid response from pairing server"
+            };
+        }
+
+        return {
+            ok: response.ok,
+            status: response.status,
+            data
+        };
+    } finally {
+        clearTimeout(timeout);
     }
 }
 
 /* =========================================================
-   START WHATSAPP CONNECTION
+   SESSION VERIFICATION
 ========================================================= */
 
-async function startPairing(
-    number,
-    pairingId,
-    existingAuthFolder = null,
-    existingSessionId = null
-) {
-
-    const clean =
-        cleanNumber(
-            number
-        );
-
-    if (!clean) {
-        throw new Error(
-            "Invalid phone number"
-        );
-    }
-
-    let authFolder =
-        existingAuthFolder;
-
-    if (!authFolder) {
-
-        authFolder =
-            path.join(
-                AUTH_DIR,
-                `ETIAS_${clean}_${Date.now()}_${Math.random()
-                    .toString(16)
-                    .slice(2, 10)}`
-            );
-    }
-
-    await fsp.mkdir(
-        authFolder,
-        {
-            recursive: true
-        }
-    );
-
-    console.log(
-        `[PAIR] Auth folder: ${authFolder}`
-    );
-
-    const {
-        state,
-        saveCreds
-    } =
-        await useMultiFileAuthState(
-            authFolder
-        );
-
-    const sock =
-        makeWASocket({
-
-            auth: {
-
-                creds:
-                    state.creds,
-
-                keys:
-                    makeCacheableSignalKeyStore(
-                        state.keys,
-                        logger
-                    )
-            },
-
-            logger,
-
-            browser:
-                Browsers.macOS(
-                    "Chrome"
-                ),
-
-            markOnlineOnConnect:
-                false,
-
-            syncFullHistory:
-                false,
-
-            generateHighQualityLinkPreview:
-                false,
-
-            connectTimeoutMs:
-                60000,
-
-            defaultQueryTimeoutMs:
-                60000,
-
-            keepAliveIntervalMs:
-                25000
-        });
-
-    sockets.set(
-        pairingId,
-        sock
-    );
-
-    updatePairing(
-        pairingId,
-        {
-            status:
-                "connecting",
-
-            connected:
-                false,
-
-            authFolder
-        }
-    );
-
-    sock.ev.on(
-        "creds.update",
-        saveCreds
-    );
-
-    /* =====================================================
-       CONNECTION UPDATE
-    ===================================================== */
-
-    sock.ev.on(
-        "connection.update",
-        async update => {
-
-            const {
-                connection,
-                lastDisconnect,
-                qr
-            } = update;
-
-            /* =================================================
-               QR
-            ================================================= */
-
-            if (qr) {
-
-                updatePairing(
-                    pairingId,
-                    {
-                        status:
-                            "qr",
-
-                        connected:
-                            false
-                    }
-                );
-
-                try {
-
-                    const qrData =
-                        await QRCode.toDataURL(
-                            qr
-                        );
-
-                    updatePairing(
-                        pairingId,
-                        {
-                            qrImage:
-                                qrData
-                        }
-                    );
-
-                } catch (error) {
-
-                    console.error(
-                        "[QR]",
-                        error.message
-                    );
-                }
-            }
-
-            /* =================================================
-               CONNECTING
-            ================================================= */
-
-            if (
-                connection ===
-                "connecting"
-            ) {
-
-                console.log(
-                    `[PAIR] Connecting ${pairingId}`
-                );
-
-                updatePairing(
-                    pairingId,
-                    {
-                        status:
-                            "connecting",
-
-                        connected:
-                            false
-                    }
-                );
-            }
-
-            /* =================================================
-               OPEN
-            ================================================= */
-
-            if (
-                connection ===
-                "open"
-            ) {
-
-                console.log(
-                    "========================================"
-                );
-
-                console.log(
-                    "✅ WHATSAPP CONNECTED"
-                );
-
-                console.log(
-                    `PAIR ID: ${pairingId}`
-                );
-
-                console.log(
-                    `JID: ${
-                        sock.user?.id ||
-                        "unknown"
-                    }`
-                );
-
-                console.log(
-                    "========================================"
-                );
-
-                try {
-
-                    await sleep(
-                        1500
-                    );
-
-                    await saveCreds();
-
-                    const authenticatedJid =
-                        sock.user?.id;
-
-                    if (
-                        !authenticatedJid
-                    ) {
-                        throw new Error(
-                            "Authenticated WhatsApp JID unavailable"
-                        );
-                    }
-
-                    const normalizedJid =
-                        normalizeJid(
-                            authenticatedJid
-                        );
-
-                    const connectedNumber =
-                        numberFromJid(
-                            normalizedJid
-                        );
-
-                    /*
-                     * Reuse an existing session ID
-                     * if this is a restored connection.
-                     */
-                    let sessionId =
-                        existingSessionId;
-
-                    if (
-                        !sessionId
-                    ) {
-                        sessionId =
-                            createUniqueSessionId();
-                    }
-
-                    /*
-                     * Validate generated ID.
-                     */
-                    if (
-                        !isValidSessionId(
-                            sessionId
-                        )
-                    ) {
-                        throw new Error(
-                            "Invalid generated session ID"
-                        );
-                    }
-
-                    const session = {
-
-                        sessionId,
-
-                        pairingId,
-
-                        number:
-                            connectedNumber ||
-                            clean,
-
-                        jid:
-                            normalizedJid,
-
-                        authFolder,
-
-                        status:
-                            "awaiting_deployment",
-
-                        connected:
-                            true,
-
-                        sent:
-                            false,
-
-                        createdAt:
-                            new Date()
-                                .toISOString(),
-
-                        updatedAt:
-                            new Date()
-                                .toISOString()
-                    };
-
-                    await saveSession(
-                        session
-                    );
-
-                    updatePairing(
-                        pairingId,
-                        {
-                            status:
-                                "session_ready",
-
-                            connected:
-                                true,
-
-                            jid:
-                                normalizedJid,
-
-                            authFolder,
-
-                            sessionId,
-
-                            number:
-                                session.number
-                        }
-                    );
-
-                    console.log(
-                        "========================================"
-                    );
-
-                    console.log(
-                        "🆔 SESSION ID GENERATED"
-                    );
-
-                    console.log(
-                        `SESSION ID: ${sessionId}`
-                    );
-
-                    console.log(
-                        `NUMBER: ${session.number}`
-                    );
-
-                    console.log(
-                        `PAIR ID: ${pairingId}`
-                    );
-
-                    console.log(
-                        "========================================"
-                    );
-
-                    /*
-                     * Send the REAL session ID to WhatsApp.
-                     */
-                    await sendSessionId(
-                        sock,
-                        sessionId,
-                        normalizedJid
-                    );
-
-                    session.sent =
-                        true;
-
-                    await saveSession(
-                        session
-                    );
-
-                    updatePairing(
-                        pairingId,
-                        {
-                            status:
-                                "awaiting_deployment",
-
-                            connected:
-                                true,
-
-                            sent:
-                                true,
-
-                            sessionId
-                        }
-                    );
-
-                    console.log(
-                        "========================================"
-                    );
-
-                    console.log(
-                        "📲 SESSION ID SENT"
-                    );
-
-                    console.log(
-                        `SESSION: ${sessionId}`
-                    );
-
-                    console.log(
-                        "Waiting for deployment page..."
-                    );
-
-                    console.log(
-                        "========================================"
-                    );
-
-                } catch (error) {
-
-                    console.error(
-                        "[SESSION ERROR]",
-                        error
-                    );
-
-                    updatePairing(
-                        pairingId,
-                        {
-                            status:
-                                "error",
-
-                            connected:
-                                true,
-
-                            error:
-                                error.message ||
-                                String(error)
-                        }
-                    );
-                }
-            }
-
-            /* =================================================
-               CLOSE
-            ================================================= */
-
-            if (
-                connection ===
-                "close"
-            ) {
-
-                const code =
-                    getDisconnectCode(
-                        lastDisconnect
-                    );
-
-                console.log(
-                    `[PAIR] Connection closed: ${code}`
-                );
-
-                sockets.delete(
-                    pairingId
-                );
-
-                /* =============================================
-                   LOGGED OUT
-                ============================================= */
-
-                if (
-                    isLoggedOut(code)
-                ) {
-
-                    console.log(
-                        "[PAIR] ❌ WhatsApp logged out"
-                    );
-
-                    const pairing =
-                        getPairing(
-                            pairingId
-                        );
-
-                    if (
-                        pairing?.sessionId
-                    ) {
-
-                        const session =
-                            getSessionById(
-                                pairing.sessionId
-                            );
-
-                        if (
-                            session
-                        ) {
-
-                            session.connected =
-                                false;
-
-                            session.status =
-                                "logged_out";
-
-                            await saveSession(
-                                session
-                            );
-                        }
-                    }
-
-                    updatePairing(
-                        pairingId,
-                        {
-                            status:
-                                "logged_out",
-
-                            connected:
-                                false
-                        }
-                    );
-
-                    return;
-                }
-
-                /* =============================================
-                   BAD SESSION
-                ============================================= */
-
-                if (
-                    isBadSession(code)
-                ) {
-
-                    console.log(
-                        "[PAIR] ❌ Bad session"
-                    );
-
-                    updatePairing(
-                        pairingId,
-                        {
-                            status:
-                                "bad_session",
-
-                            connected:
-                                false
-                        }
-                    );
-
-                    return;
-                }
-
-                /* =============================================
-                   RECONNECT
-                ============================================= */
-
-                if (
-                    reconnecting.has(
-                        pairingId
-                    )
-                ) {
-                    return;
-                }
-
-                reconnecting.add(
-                    pairingId
-                );
-
-                updatePairing(
-                    pairingId,
-                    {
-                        status:
-                            "reconnecting",
-
-                        connected:
-                            false
-                    }
-                );
-
-                console.log(
-                    "[PAIR] 🔄 Reconnecting..."
-                );
-
-                const pairing =
-                    getPairing(
-                        pairingId
-                    );
-
-                const session =
-                    pairing?.sessionId
-                        ? getSessionById(
-                              pairing.sessionId
-                          )
-                        : null;
-
-                setTimeout(
-                    async () => {
-
-                        try {
-
-                            reconnecting.delete(
-                                pairingId
-                            );
-
-                            await startPairing(
-                                clean,
-                                pairingId,
-                                authFolder,
-                                session?.sessionId ||
-                                    existingSessionId
-                            );
-
-                        } catch (error) {
-
-                            reconnecting.delete(
-                                pairingId
-                            );
-
-                            console.error(
-                                "[PAIR] Reconnect failed:",
-                                error.message
-                            );
-
-                            updatePairing(
-                                pairingId,
-                                {
-                                    status:
-                                        "error",
-
-                                    connected:
-                                        false,
-
-                                    error:
-                                        error.message
-                                }
-                            );
-                        }
-
-                    },
-
-                    isRestartRequired(
-                        code
-                    )
-                        ? 1000
-                        : 3000
-                );
-            }
-        }
-    );
+async function verifySessionWithPairingServer(sessionId, phone) {
+    const encoded = encodeURIComponent(sessionId);
 
     /*
-     * IMPORTANT:
+     * Preferred endpoint.
      *
-     * There is NO requestPairingCode()
-     * here.
+     * The pairing server should expose:
      *
-     * Pairing is handled by the existing
-     * pairing/QR flow.
+     * GET /session/:sessionId
+     *
+     * or:
+     *
+     * GET /session-status/:sessionId
      */
-    return sock;
+
+    const endpoints = [
+        `/session/${encoded}`,
+        `/session-status/${encoded}`,
+        `/check-session/${encoded}`
+    ];
+
+    let lastResult = null;
+
+    for (const endpoint of endpoints) {
+        try {
+            const result = await callPairingServer(endpoint);
+
+            lastResult = result;
+
+            if (result.status === 404) {
+                continue;
+            }
+
+            if (!result.ok) {
+                continue;
+            }
+
+            const data = result.data || {};
+
+            const record =
+                data.session ||
+                data.data ||
+                data.result ||
+                data;
+
+            const storedPhone = normalizePhone(
+                record.phone ||
+                record.number ||
+                record.msisdn ||
+                record.jid ||
+                ""
+            );
+
+            const requestedPhone = normalizePhone(phone);
+
+            if (
+                storedPhone &&
+                requestedPhone &&
+                !storedPhone.endsWith(requestedPhone) &&
+                !requestedPhone.endsWith(storedPhone)
+            ) {
+                return {
+                    valid: false,
+                    error: "Session ID does not belong to this phone number."
+                };
+            }
+
+            return {
+                valid:
+                    data.valid !== false &&
+                    data.success !== false &&
+                    data.error === undefined,
+                data
+            };
+        } catch (error) {
+            lastResult = {
+                error: error.message
+            };
+        }
+    }
+
+    return {
+        valid: false,
+        unavailable: true,
+        error:
+            "Could not verify the Session ID with the pairing server.",
+        details: lastResult
+    };
 }
 
 /* =========================================================
-   HOME
+   DEPLOYMENT RECORDS
 ========================================================= */
 
-app.get(
-    "/",
-    (req, res) => {
+async function getDeployments() {
+    return await readJson(DEPLOYED_FILE, []);
+}
 
-        const file =
-            path.join(
-                ROOT,
-                "index.html"
-            );
+async function saveDeployments(records) {
+    await writeJson(DEPLOYED_FILE, records);
+}
 
-        if (
-            fs.existsSync(file)
-        ) {
-            return res.sendFile(
-                file
-            );
+async function findDeployment(sessionId) {
+    const records = await getDeployments();
+
+    return records.find(
+        item =>
+            normalizeSessionId(item.sessionId) ===
+            normalizeSessionId(sessionId)
+    );
+}
+
+async function findActivePhone(phone) {
+    const normalized = normalizePhone(phone);
+
+    const records = await getDeployments();
+
+    return records.find(item => {
+        if (normalizePhone(item.phone) !== normalized) {
+            return false;
         }
 
-        res.json({
-            success:
-                true,
+        if (item.status === "expired") {
+            return false;
+        }
 
-            service:
-                BOT_NAME,
+        if (!item.expireAt) {
+            return true;
+        }
 
-            status:
-                "online"
-        });
-    }
-);
+        return new Date(item.expireAt).getTime() > Date.now();
+    });
+}
 
 /* =========================================================
-   PAIR PAGE
+   DEPLOY THROUGH MAIN.JS MANAGER
 ========================================================= */
 
-app.get(
-    "/pair",
-    (req, res) => {
+async function deployThroughManager(options) {
+    const botManager = manager();
 
-        const file =
-            path.join(
-                ROOT,
-                "pair.html"
-            );
-
-        if (
-            fs.existsSync(file)
-        ) {
-            return res.sendFile(
-                file
-            );
-        }
-
-        res.status(404).send(
-            "pair.html not found"
+    if (!botManager) {
+        throw new Error(
+            "ETIAS_BOT_MANAGER is not initialized yet."
         );
     }
-);
 
-/* =========================================================
-   QR PAGE
-========================================================= */
-
-app.get(
-    "/qr",
-    (req, res) => {
-
-        const file =
-            path.join(
-                ROOT,
-                "qr.html"
-            );
-
-        if (
-            fs.existsSync(file)
-        ) {
-            return res.sendFile(
-                file
-            );
-        }
-
-        res.status(404).send(
-            "qr.html not found"
+    if (typeof botManager.deploySession !== "function") {
+        throw new Error(
+            "deploySession() is not available in ETIAS_BOT_MANAGER."
         );
     }
-);
+
+    return await botManager.deploySession(options);
+}
 
 /* =========================================================
-   PING
+   POST /DEPLOY
 ========================================================= */
 
-app.get(
-    "/ping",
-    (req, res) => {
+app.post("/deploy", async (req, res) => {
+    const sessionId = normalizeSessionId(req.body.sessionId);
+    const phone = normalizePhone(req.body.phone);
+    const days = safeDays(req.body.days);
 
-        res.json({
+    await appendLog("Deployment request received", {
+        sessionId,
+        phone,
+        days
+    });
 
-            status:
-                "online",
-
-            service:
-                BOT_NAME,
-
-            sessions:
-                sessions.size,
-
-            sockets:
-                sockets.size,
-
-            uptime:
-                process.uptime(),
-
-            time:
-                new Date()
-                    .toISOString()
-        });
+    if (!isValidSessionId(sessionId)) {
+        return jsonError(
+            res,
+            400,
+            "Invalid Session ID. Expected ETIAS-MINI-BOT~12345678."
+        );
     }
-);
 
-/* =========================================================
-   HEALTH
-========================================================= */
-
-app.get(
-    "/health",
-    (req, res) => {
-
-        res.json({
-
-            status:
-                "online",
-
-            sockets:
-                sockets.size,
-
-            sessions:
-                sessions.size,
-
-            pairings:
-                getAllPairings()
-                    .length,
-
-            uptime:
-                process.uptime()
-        });
+    if (!phone || phone.length < 7) {
+        return jsonError(
+            res,
+            400,
+            "A valid WhatsApp phone number is required."
+        );
     }
-);
 
-/* =========================================================
-   CREATE PAIRING
-========================================================= */
+    try {
+        const existing = await findDeployment(sessionId);
 
-app.get(
-    "/code",
-    async (req, res) => {
-
-        try {
-
-            const number =
-                cleanNumber(
-                    req.query.number
-                );
-
-            if (!number) {
-
-                return res.status(
-                    400
-                ).json({
-
-                    success:
-                        false,
-
-                    error:
-                        "Phone number is required"
-                });
-            }
-
-            const existing =
-                getAllPairings()
-                    .find(
-                        item =>
-
-                            item.number ===
-                                number &&
-
-                            [
-                                "starting",
-                                "connecting",
-                                "qr",
-                                "reconnecting",
-                                "session_ready",
-                                "awaiting_deployment"
-                            ].includes(
-                                item.status
-                            )
-                    );
-
-            if (existing) {
-
-                return res.json({
-
-                    success:
-                        true,
-
-                    pairingId:
-                        existing.id,
-
-                    number,
-
-                    status:
-                        existing.status,
-
-                    sessionId:
-                        existing.sessionId ||
-                        null,
-
-                    message:
-                        "Pairing session already exists."
-                });
-            }
-
-            const pairing =
-                createPairing(
-                    number
-                );
-
-            updatePairing(
-                pairing.id,
+        if (existing && existing.status === "deployed") {
+            return jsonError(
+                res,
+                409,
+                "This Session ID has already been deployed.",
                 {
-                    status:
-                        "starting"
+                    deployment: existing
                 }
             );
-
-            startPairing(
-                number,
-                pairing.id
-            ).catch(
-                error => {
-
-                    console.error(
-                        "[PAIR] Startup error:",
-                        error
-                    );
-
-                    updatePairing(
-                        pairing.id,
-                        {
-                            status:
-                                "error",
-
-                            connected:
-                                false,
-
-                            error:
-                                error.message ||
-                                String(error)
-                        }
-                    );
-                }
-            );
-
-            await sleep(
-                1200
-            );
-
-            const current =
-                getPairing(
-                    pairing.id
-                );
-
-            return res.json({
-
-                success:
-                    true,
-
-                pairingId:
-                    pairing.id,
-
-                number,
-
-                status:
-                    current?.status ||
-                    "starting",
-
-                sessionId:
-                    current?.sessionId ||
-                    null,
-
-                message:
-                    "Pairing started."
-            });
-
-        } catch (error) {
-
-            console.error(
-                "[CODE]",
-                error
-            );
-
-            return res.status(
-                500
-            ).json({
-
-                success:
-                    false,
-
-                error:
-                    error.message ||
-                    String(error)
-            });
-        }
-    }
-);
-
-/* =========================================================
-   STATUS
-========================================================= */
-
-app.get(
-    "/status/:id",
-    (req, res) => {
-
-        const pairing =
-            getPairing(
-                req.params.id
-            );
-
-        if (!pairing) {
-
-            return res.status(
-                404
-            ).json({
-
-                success:
-                    false,
-
-                error:
-                    "Pairing ID not found"
-            });
         }
 
-        const safe = {
-            ...pairing
-        };
+        const activePhone = await findActivePhone(phone);
+
+        if (
+            activePhone &&
+            normalizeSessionId(activePhone.sessionId) !== sessionId
+        ) {
+            return jsonError(
+                res,
+                409,
+                "This phone number already has an active deployment."
+            );
+        }
 
         /*
-         * Never expose auth credentials.
+         * Ask the pairing service to validate that the
+         * Session ID actually exists.
          */
-        delete safe.authState;
 
-        delete safe.auth;
-
-        delete safe.deploymentCode;
-
-        res.json({
-
-            success:
-                true,
-
-            ...safe
-        });
-    }
-);
-
-/* =========================================================
-   CHECK PAIRING
-========================================================= */
-
-app.get(
-    "/check/:id",
-    (req, res) => {
-
-        const pairing =
-            getPairing(
-                req.params.id
+        const verification =
+            await verifySessionWithPairingServer(
+                sessionId,
+                phone
             );
 
-        if (!pairing) {
-
-            return res.status(
-                404
-            ).json({
-
-                success:
-                    false,
-
-                error:
-                    "Pairing ID not found"
-            });
-        }
-
-        res.json({
-
-            success:
-                true,
-
-            id:
-                pairing.id,
-
-            number:
-                pairing.number,
-
-            status:
-                pairing.status,
-
-            connected:
-                pairing.connected,
-
-            sent:
-                pairing.sent,
-
-            jid:
-                pairing.jid ||
-                null,
-
-            sessionId:
-                pairing.sessionId ||
-                null,
-
-            error:
-                pairing.error ||
-                null
-        });
-    }
-);
-
-/* =========================================================
-   SESSION VALIDATION
-========================================================= */
-
-app.get(
-    "/session/:sessionId",
-    (req, res) => {
-
-        const sessionId =
-            String(
-                req.params.sessionId ||
-                ""
-            ).trim();
-
-        if (
-            !isValidSessionId(
-                sessionId
-            )
-        ) {
-
-            return res.status(
-                400
-            ).json({
-
-                success:
-                    false,
-
-                valid:
-                    false,
-
-                error:
-                    "Invalid session ID format"
-            });
-        }
-
-        const session =
-            getSessionById(
-                sessionId
-            );
-
-        if (!session) {
-
-            return res.status(
-                404
-            ).json({
-
-                success:
-                    false,
-
-                valid:
-                    false,
-
-                error:
-                    "Session ID not found"
-            });
-        }
-
-        const sock =
-            sockets.get(
-                session.pairingId
-            );
-
-        res.json({
-
-            success:
-                true,
-
-            valid:
-                true,
-
-            sessionId:
-                session.sessionId,
-
-            number:
-                session.number,
-
-            jid:
-                session.jid,
-
-            connected:
-                Boolean(
-                    sock &&
-                    session.connected
-                ),
-
-            status:
-                session.status,
-
-            deployed:
-                session.status ===
-                "deployed",
-
-            createdAt:
-                session.createdAt,
-
-            expireAt:
-                session.expireAt ||
-                null
-        });
-    }
-);
-
-/* =========================================================
-   DEPLOY
-========================================================= */
-
-app.post(
-    "/deploy",
-    async (req, res) => {
-
-        try {
-
-            const sessionId =
-                String(
-                    req.body.sessionId ||
-                    ""
-                ).trim();
-
-            const phone =
-                cleanNumber(
-                    req.body.phone ||
-                    req.body.number
-                );
-
-            const days =
-                Math.max(
-                    1,
-                    Number(
-                        req.body.days ||
-                        req.body.duration ||
-                        30
-                    )
-                );
-
-            /* =============================================
-               VALIDATE SESSION FORMAT
-            ============================================= */
-
-            if (
-                !isValidSessionId(
-                    sessionId
-                )
-            ) {
-
-                return res.status(
-                    400
-                ).json({
-
-                    success:
-                        false,
-
-                    error:
-                        "Invalid Session ID. Expected ETIAS-MINI-BOT~12345678"
-                });
-            }
-
-            /* =============================================
-               VALIDATE PHONE
-            ============================================= */
-
-            if (!phone) {
-
-                return res.status(
-                    400
-                ).json({
-
-                    success:
-                        false,
-
-                    error:
-                        "User WhatsApp number is required"
-                });
-            }
-
-            /* =============================================
-               FIND REAL SESSION
-            ============================================= */
-
-            const session =
-                getSessionById(
-                    sessionId
-                );
-
-            if (!session) {
-
-                return res.status(
-                    404
-                ).json({
-
-                    success:
-                        false,
-
-                    error:
-                        "Session ID does not exist. Generate a real Session ID first."
-                });
-            }
-
-            /* =============================================
-               VERIFY NUMBER
-            ============================================= */
-
-            const sessionNumber =
-                cleanNumber(
-                    session.number
-                );
-
-            const jidNumber =
-                cleanNumber(
-                    numberFromJid(
-                        session.jid
-                    )
-                );
-
-            /*
-             * The number entered on the dashboard
-             * MUST be the same WhatsApp account
-             * that received the session ID.
-             */
-            if (
-                phone !==
-                    sessionNumber &&
-                phone !==
-                    jidNumber
-            ) {
-
-                return res.status(
-                    403
-                ).json({
-
-                    success:
-                        false,
-
-                    error:
-                        "The WhatsApp number does not match the account that received this Session ID."
-                });
-            }
-
-            /* =============================================
-               FIND LIVE SOCKET
-            ============================================= */
-
-            const sock =
-                sockets.get(
-                    session.pairingId
-                );
-
-            if (!sock) {
-
-                return res.status(
-                    410
-                ).json({
-
-                    success:
-                        false,
-
-                    error:
-                        "This Session ID is real, but its WhatsApp connection is no longer active. Re-pair the number and generate a new Session ID."
-                });
-            }
-
-            /* =============================================
-               VERIFY CONNECTED
-            ============================================= */
-
-            if (
-                !session.connected ||
-                !sock.user
-            ) {
-
-                return res.status(
-                    409
-                ).json({
-
-                    success:
-                        false,
-
-                    error:
-                        "WhatsApp account is not currently connected."
-                });
-            }
-
-            /* =============================================
-               PREVENT DUPLICATE DEPLOYMENT
-            ============================================= */
-
-            if (
-                session.status ===
-                    "deployed"
-            ) {
-
-                return res.status(
-                    409
-                ).json({
-
-                    success:
-                        false,
-
-                    error:
-                        "This Session ID has already been deployed."
-                });
-            }
-
-            /* =============================================
-               DEPLOY
-            ============================================= */
-
-            console.log(
-                "========================================"
-            );
-
-            console.log(
-                "🚀 DEPLOYMENT STARTED"
-            );
-
-            console.log(
-                `SESSION: ${sessionId}`
-            );
-
-            console.log(
-                `NUMBER: ${phone}`
-            );
-
-            console.log(
-                `DAYS: ${days}`
-            );
-
-            console.log(
-                `PAIR ID: ${session.pairingId}`
-            );
-
-            console.log(
-                `AUTH: ${session.authFolder}`
-            );
-
-            console.log(
-                "========================================"
-            );
-
-            await saveSuccessfulDeployment(
-                session,
-                days
-            );
-
-            /*
-             * Keep socket alive.
-             *
-             * The authenticated WhatsApp account
-             * is already connected and becomes the bot.
-             */
-            try {
-
-                if (
-                    typeof sock.sendPresenceUpdate ===
-                    "function"
-                ) {
-
-                    await sock.sendPresenceUpdate(
-                        "available"
-                    );
+        if (!verification.valid) {
+            await appendLog(
+                "Session verification failed",
+                {
+                    sessionId,
+                    phone,
+                    error: verification.error
                 }
-
-            } catch (error) {
-
-                console.log(
-                    "[DEPLOY] Presence update skipped:",
-                    error.message
-                );
-            }
-
-            return res.json({
-
-                success:
-                    true,
-
-                message:
-                    "Bot deployed successfully and WhatsApp connection is active.",
-
-                bot:
-                    BOT_NAME,
-
-                sessionId:
-                    session.sessionId,
-
-                phone:
-                    session.number,
-
-                jid:
-                    session.jid,
-
-                days,
-
-                status:
-                    "deployed",
-
-                connected:
-                    true,
-
-                expireAt:
-                    session.expireAt
-            });
-
-        } catch (error) {
-
-            console.error(
-                "[DEPLOY ERROR]",
-                error
             );
 
-            return res.status(
-                500
-            ).json({
-
-                success:
-                    false,
-
-                error:
-                    error.message ||
-                    String(error)
-            });
+            return jsonError(
+                res,
+                verification.unavailable ? 503 : 400,
+                verification.error ||
+                    "Session ID could not be verified."
+            );
         }
-    }
-);
 
-/* =========================================================
-   GET SESSION LIST
-========================================================= */
+        const expireAt = getExpireDate(days);
 
-app.get(
-    "/sessions",
-    (req, res) => {
+        /*
+         * Important:
+         *
+         * main.js handles the actual Baileys session.
+         * This server does NOT generate a pairing code.
+         */
 
-        const list =
-            Array.from(
-                sessions.values()
-            ).map(
-                session => ({
+        const result = await deployThroughManager({
+            sessionId,
+            phone,
+            days,
+            expireAt: expireAt.toISOString(),
+            pairingServer: PAIRING_SERVER_URL,
 
-                    sessionId:
-                        session.sessionId,
+            /*
+             * Let main.js resolve the persisted auth state.
+             */
+            authFolder:
+                verification.data?.authFolder ||
+                verification.data?.session?.authFolder ||
+                null,
 
-                    number:
-                        session.number,
-
-                    status:
-                        session.status,
-
-                    connected:
-                        session.connected,
-
-                    days:
-                        session.days ||
-                        null,
-
-                    expireAt:
-                        session.expireAt ||
-                        null,
-
-                    createdAt:
-                        session.createdAt,
-
-                    deployedAt:
-                        session.deployedAt ||
-                        null
-                })
-            );
-
-        res.json({
-
-            success:
-                true,
-
-            total:
-                list.length,
-
-            sessions:
-                list
+            pairingId:
+                verification.data?.pairingId ||
+                verification.data?.session?.pairingId ||
+                null
         });
+
+        const records = await getDeployments();
+
+        const deployment = {
+            sessionId,
+            phone,
+            days,
+            expireAt: expireAt.toISOString(),
+
+            status: "deployed",
+            connected: false,
+
+            pairingServer: PAIRING_SERVER_URL,
+
+            createdAt: now(),
+            lastSeen: now(),
+
+            result:
+                result && typeof result === "object"
+                    ? result
+                    : null
+        };
+
+        const index = records.findIndex(
+            item =>
+                normalizeSessionId(item.sessionId) ===
+                sessionId
+        );
+
+        if (index >= 0) {
+            records[index] = {
+                ...records[index],
+                ...deployment
+            };
+        } else {
+            records.push(deployment);
+        }
+
+        await saveDeployments(records);
+
+        await appendLog(
+            "Deployment successful",
+            deployment
+        );
+
+        return res.json({
+            success: true,
+            message: "ETIAS-MINI-BOT deployed successfully.",
+            deployment
+        });
+    } catch (error) {
+        await appendLog(
+            "Deployment failed",
+            {
+                sessionId,
+                phone,
+                error: error.message,
+                stack: error.stack
+            }
+        );
+
+        console.error(
+            "[DEPLOY ERROR]",
+            error
+        );
+
+        return jsonError(
+            res,
+            500,
+            error.message ||
+                "Failed to deploy bot session."
+        );
     }
-);
+});
 
 /* =========================================================
-   DEPLOYED LIST
+   GET /DEPLOY
+   Compatibility/status endpoint
 ========================================================= */
 
-app.get(
-    "/deployed-list",
-    async (req, res) => {
-
-        try {
-
-            const users =
-                await loadDeployed();
-
-            const safeUsers =
-                users.map(
-                    user => {
-
-                        const copy =
-                            {
-                                ...user
-                            };
-
-                        delete copy.authFolder;
-
-                        delete copy.sessionId;
-
-                        delete copy.deploymentCode;
-
-                        delete copy.auth;
-
-                        return copy;
-                    }
-                );
-
-            res.json({
-
-                success:
-                    true,
-
-                count:
-                    safeUsers.length,
-
-                users:
-                    safeUsers
-            });
-
-        } catch (error) {
-
-            res.status(
-                500
-            ).json({
-
-                success:
-                    false,
-
-                error:
-                    error.message ||
-                    String(error)
-            });
+app.get("/deploy", async (req, res) => {
+    res.json({
+        success: false,
+        message:
+            "Use POST /deploy with sessionId, phone and days.",
+        example: {
+            sessionId: "ETIAS-MINI-BOT~12345678",
+            phone: "263771234567",
+            days: 30
         }
+    });
+});
+
+/* =========================================================
+   SESSION STATUS
+========================================================= */
+
+app.get("/status/:sessionId", async (req, res) => {
+    const sessionId = normalizeSessionId(
+        req.params.sessionId
+    );
+
+    if (!isValidSessionId(sessionId)) {
+        return jsonError(
+            res,
+            400,
+            "Invalid Session ID."
+        );
     }
-);
+
+    const deployment =
+        await findDeployment(sessionId);
+
+    const botManager = manager();
+
+    let managerStatus = null;
+
+    try {
+        if (
+            botManager &&
+            typeof botManager.getSessionStatus ===
+                "function"
+        ) {
+            managerStatus =
+                await botManager.getSessionStatus(
+                    sessionId
+                );
+        }
+    } catch (error) {
+        managerStatus = {
+            error: error.message
+        };
+    }
+
+    return res.json({
+        success: true,
+        sessionId,
+        deployment: deployment || null,
+        manager: managerStatus,
+        time: now()
+    });
+});
+
+/* =========================================================
+   SESSION LOOKUP
+========================================================= */
+
+app.get("/api/session/:sessionId", async (req, res) => {
+    const sessionId = normalizeSessionId(
+        req.params.sessionId
+    );
+
+    if (!isValidSessionId(sessionId)) {
+        return jsonError(
+            res,
+            400,
+            "Invalid Session ID."
+        );
+    }
+
+    const deployment =
+        await findDeployment(sessionId);
+
+    return res.json({
+        success: true,
+        sessionId,
+        deployment: deployment || null
+    });
+});
+
+/* =========================================================
+   ALL DEPLOYED SESSIONS
+========================================================= */
+
+app.get("/sessions", async (req, res) => {
+    const records = await getDeployments();
+
+    const safe = records.map(item => ({
+        sessionId: item.sessionId,
+        phone: item.phone,
+        days: item.days,
+        status: item.status,
+        connected: item.connected,
+        expireAt: item.expireAt,
+        createdAt: item.createdAt,
+        lastSeen: item.lastSeen
+    }));
+
+    res.json({
+        success: true,
+        total: safe.length,
+        sessions: safe
+    });
+});
+
+app.get("/api/sessions", async (req, res) => {
+    const records = await getDeployments();
+
+    res.json({
+        success: true,
+        total: records.length,
+        sessions: records
+    });
+});
+
+/* =========================================================
+   DEPLOYMENT STATS
+========================================================= */
+
+app.get("/deploy-stats", async (req, res) => {
+    const records = await getDeployments();
+
+    const active = records.filter(
+        item =>
+            item.status !== "expired" &&
+            (!item.expireAt ||
+                new Date(item.expireAt).getTime() >
+                    Date.now())
+    );
+
+    const connected = records.filter(
+        item => item.connected === true
+    );
+
+    const expired = records.filter(
+        item =>
+            item.status === "expired" ||
+            (item.expireAt &&
+                new Date(item.expireAt).getTime() <=
+                    Date.now())
+    );
+
+    res.json({
+        success: true,
+        total: records.length,
+        active: active.length,
+        connected: connected.length,
+        expired: expired.length,
+        time: now()
+    });
+});
 
 /* =========================================================
    TOTAL USERS
 ========================================================= */
 
-app.get(
-    "/total-users",
-    async (req, res) => {
+app.get("/total-users", async (req, res) => {
+    const records = await getDeployments();
 
-        try {
+    const uniquePhones =
+        new Set(
+            records
+                .map(item => normalizePhone(item.phone))
+                .filter(Boolean)
+        );
 
-            const users =
-                await loadDeployed();
-
-            res.json({
-
-                success:
-                    true,
-
-                total:
-                    users.length
-            });
-
-        } catch (error) {
-
-            res.status(
-                500
-            ).json({
-
-                success:
-                    false,
-
-                error:
-                    error.message ||
-                    String(error)
-            });
-        }
-    }
-);
+    res.json({
+        success: true,
+        totalUsers: uniquePhones.size
+    });
+});
 
 /* =========================================================
-   DEPLOY STATS
+   LOGS
 ========================================================= */
 
-app.get(
-    "/deploy-stats",
-    async (req, res) => {
+app.get("/logs", async (req, res) => {
+    const file =
+        path.join(LOG_DIR, "server.log");
 
-        try {
+    try {
+        const content =
+            await fsp.readFile(file, "utf8");
 
-            const users =
-                await loadDeployed();
+        const lines =
+            content
+                .split("\n")
+                .filter(Boolean)
+                .slice(-200);
 
-            const connected =
-                users.filter(
-                    user =>
-                        user.connected ===
-                        true
-                ).length;
-
-            const sent =
-                users.filter(
-                    user =>
-                        user.sent ===
-                        true
-                ).length;
-
-            const deployed =
-                users.filter(
-                    user =>
-                        user.status ===
-                        "deployed"
-                ).length;
-
-            res.json({
-
-                success:
-                    true,
-
-                total:
-                    users.length,
-
-                connected,
-
-                sent,
-
-                deployed
-            });
-
-        } catch (error) {
-
-            res.status(
-                500
-            ).json({
-
-                success:
-                    false,
-
-                error:
-                    error.message ||
-                    String(error)
-            });
-        }
+        res.json({
+            success: true,
+            total: lines.length,
+            logs: lines
+        });
+    } catch {
+        res.json({
+            success: true,
+            total: 0,
+            logs: []
+        });
     }
-);
+});
 
 /* =========================================================
-   QR IMAGE
+   BOT MANAGER STATUS
 ========================================================= */
 
-app.get(
-    "/qr-image",
-    (req, res) => {
+app.get("/manager", async (req, res) => {
+    const botManager = manager();
 
-        const id =
-            req.query.id;
-
-        if (!id) {
-
-            return res.status(
-                400
-            ).json({
-
-                success:
-                    false,
-
-                error:
-                    "Pairing ID required"
-            });
-        }
-
-        const pairing =
-            getPairing(id);
-
-        if (!pairing) {
-
-            return res.status(
-                404
-            ).json({
-
-                success:
-                    false,
-
-                error:
-                    "Pairing ID not found"
-            });
-        }
-
-        if (
-            !pairing.qrImage
-        ) {
-
-            return res.status(
-                404
-            ).json({
-
-                success:
-                    false,
-
-                error:
-                    "QR code not available"
-            });
-        }
-
-        try {
-
-            const base64 =
-                pairing.qrImage.replace(
-                    /^data:image\/png;base64,/,
-                    ""
-                );
-
-            res.type(
-                "png"
-            );
-
-            res.send(
-                Buffer.from(
-                    base64,
-                    "base64"
-                )
-            );
-
-        } catch (error) {
-
-            res.status(
-                500
-            ).json({
-
-                success:
-                    false,
-
-                error:
-                    error.message
-            });
-        }
+    if (!botManager) {
+        return res.status(503).json({
+            success: false,
+            manager: false,
+            message:
+                "ETIAS_BOT_MANAGER has not initialized."
+        });
     }
-);
+
+    res.json({
+        success: true,
+        manager: true,
+        methods: Object.keys(botManager).filter(
+            key =>
+                typeof botManager[key] ===
+                "function"
+        )
+    });
+});
+
+/* =========================================================
+   PAIRING SERVER STATUS
+========================================================= */
+
+app.get("/pairing-server", async (req, res) => {
+    try {
+        const result =
+            await callPairingServer("/health");
+
+        return res.status(
+            result.ok ? 200 : 503
+        ).json({
+            success: result.ok,
+            pairingServer: PAIRING_SERVER_URL,
+            status: result.status,
+            response: result.data
+        });
+    } catch (error) {
+        return res.status(503).json({
+            success: false,
+            pairingServer: PAIRING_SERVER_URL,
+            error: error.message
+        });
+    }
+});
 
 /* =========================================================
    BOT IMAGE
 ========================================================= */
 
-app.get(
-    "/bot-image",
-    (req, res) => {
+app.get("/bot-image", async (req, res) => {
+    const possible = [
+        path.join(ROOT, "media", "bot_image.png"),
+        path.join(ROOT, "media", "bot.jpg"),
+        path.join(ROOT, "media", "bot.png"),
+        path.join(ROOT, "assets", "bot_image.png")
+    ];
 
-        const imagePath =
-            path.join(
-                MEDIA_DIR,
-                "bot_image.png"
-            );
-
-        if (
-            fs.existsSync(
-                imagePath
-            )
-        ) {
-
-            return res.sendFile(
-                imagePath
-            );
+    for (const file of possible) {
+        try {
+            await fsp.access(file);
+            return res.sendFile(file);
+        } catch {
+            // Continue searching.
         }
-
-        res.status(
-            404
-        ).json({
-
-            success:
-                false,
-
-            error:
-                "Bot image not found"
-        });
     }
-);
+
+    return res.status(404).json({
+        success: false,
+        error: "Bot image not found."
+    });
+});
+
+/* =========================================================
+   STATIC FILES
+========================================================= */
+
+const publicDir = path.join(ROOT, "public");
+
+if (fs.existsSync(publicDir)) {
+    app.use(
+        express.static(publicDir)
+    );
+}
 
 /* =========================================================
    404
 ========================================================= */
 
-app.use(
-    (req, res) => {
-
-        res.status(
-            404
-        ).json({
-
-            success:
-                false,
-
-            error:
-                "Route not found",
-
-            path:
-                req.path
-        });
-    }
-);
+app.use((req, res) => {
+    res.status(404).json({
+        success: false,
+        error: "Endpoint not found.",
+        path: req.originalUrl
+    });
+});
 
 /* =========================================================
    ERROR HANDLER
 ========================================================= */
 
-app.use(
-    (
-        err,
-        req,
-        res,
-        next
-    ) => {
-
-        console.error(
-            "[EXPRESS ERROR]",
-            err
-        );
-
-        if (
-            res.headersSent
-        ) {
-
-            return next(
-                err
-            );
-        }
-
-        res.status(
-            500
-        ).json({
-
-            success:
-                false,
-
-            error:
-                err.message ||
-                "Internal server error"
-        });
-    }
-);
-
-/* =========================================================
-   START
-========================================================= */
-
-async function startServer() {
-
-    try {
-
-        await ensureDirectories();
-
-        await loadSessions();
-
-        app.listen(
-            PORT,
-            "0.0.0.0",
-            () => {
-
-                console.log(
-                    "========================================"
-                );
-
-                console.log(
-                    "🚀 ETIAS-MINI-BOT PAIR SERVER"
-                );
-
-                console.log(
-                    `🌐 PORT: ${PORT}`
-                );
-
-                console.log(
-                    `📁 ROOT: ${ROOT}`
-                );
-
-                console.log(
-                    `📁 AUTH: ${AUTH_DIR}`
-                );
-
-                console.log(
-                    `📁 DATA: ${DATA_DIR}`
-                );
-
-                console.log(
-                    `🆔 SESSION FORMAT: ${SESSION_PREFIX}12345678`
-                );
-
-                console.log(
-                    "========================================"
-                );
-            }
-        );
-
-    } catch (error) {
-
-        console.error(
-            "[SERVER] Failed to start:",
-            error
-        );
-
-        process.exit(
-            1
-        );
-    }
-}
-
-startServer();
-
-/* =========================================================
-   GRACEFUL SHUTDOWN
-========================================================= */
-
-async function shutdown(
-    signal
-) {
-
-    console.log(
-        `[SERVER] ${signal} received.`
+app.use((error, req, res, next) => {
+    console.error(
+        "[SERVER ERROR]",
+        error
     );
 
-    await saveSessions();
-
-    for (
-        const [
-            pairingId,
-            sock
-        ] of sockets.entries()
-    ) {
-
-        try {
-
-            console.log(
-                `[SERVER] Closing socket: ${pairingId}`
-            );
-
-            if (
-                sock &&
-                typeof sock.end ===
-                    "function"
-            ) {
-
-                sock.end(
-                    undefined
-                );
-            }
-
-        } catch (error) {
-
-            console.error(
-                `[SERVER] Close error ${pairingId}:`,
-                error.message
-            );
+    appendLog(
+        "Express error",
+        {
+            error: error.message,
+            stack: error.stack
         }
+    ).catch(() => {});
+
+    if (res.headersSent) {
+        return next(error);
     }
 
-    sockets.clear();
-
-    process.exit(
-        0
-    );
-}
-
-process.on(
-    "SIGINT",
-    () =>
-        shutdown("SIGINT")
-);
-
-process.on(
-    "SIGTERM",
-    () =>
-        shutdown("SIGTERM")
-);
+    res.status(500).json({
+        success: false,
+        error:
+            error.message ||
+            "Internal server error."
+    });
+});
 
 /* =========================================================
    EXPORT
 ========================================================= */
 
 module.exports = app;
-
-module.exports.startServer =
-    startServer;
-
-module.exports.startPairing =
-    startPairing;
-
-module.exports.generateSessionId =
-    generateSessionId;
-
-module.exports.isValidSessionId =
-    isValidSessionId;
