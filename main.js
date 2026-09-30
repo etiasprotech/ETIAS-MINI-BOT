@@ -1,151 +1,226 @@
 "use strict";
 
+/*
+============================================================
+ ETIAS-MINI-BOT
+ MULTI SESSION BOT ENGINE
+ WhatsApp Multi-Device
+ Pairing Code Deployment
+ MongoDB + Local Fallback
+ Live Logs
+ Automatic Reconnect
+============================================================
+*/
+
 require("dotenv").config();
 
-const express = require("express");
 const fs = require("fs");
-const fsp = fs.promises;
 const path = require("path");
+const crypto = require("crypto");
 const pino = require("pino");
+const mongoose = require("mongoose");
 
 const {
     default: makeWASocket,
     useMultiFileAuthState,
     DisconnectReason,
     Browsers,
-    makeCacheableSignalKeyStore,
-    downloadMediaMessage
+    jidNormalizedUser
 } = require("@whiskeysockets/baileys");
 
-const app = express();
+/*
+============================================================
+ CONFIG
+============================================================
+*/
 
-const PORT = process.env.PORT || 3000;
+const BOT_NAME =
+    process.env.BOT_NAME ||
+    "ETIAS-MINI-BOT";
 
-const ROOT = __dirname;
+const PREFIX =
+    process.env.PREFIX ||
+    ".";
 
-const AUTH_DIR = path.join(ROOT, "auth");
-const DATA_DIR = path.join(ROOT, "data");
-const COMMANDS_DIR = path.join(ROOT, "commands");
-const PUBLIC_DIR = path.join(ROOT, "public");
+const PORT =
+    Number(process.env.PORT) ||
+    3000;
 
-const USERS_FILE = path.join(
+const DEFAULT_DAYS =
+    Number(process.env.DEFAULT_DAYS) ||
+    30;
+
+const OWNER_NUMBER =
+    String(process.env.OWNER_NUMBER || "")
+        .replace(/\D/g, "");
+
+const MONGO_URI =
+    process.env.MONGODB_URI ||
+    process.env.MONGO_URI ||
+    "";
+
+const MODE =
+    process.env.MODE ||
+    "public";
+
+const BASE_DIR = __dirname;
+
+const AUTH_DIR =
+    path.join(BASE_DIR, "auth");
+
+const USERS_AUTH_DIR =
+    path.join(AUTH_DIR, "users");
+
+const DATA_DIR =
+    path.join(BASE_DIR, "data");
+
+const LOG_DIR =
+    path.join(BASE_DIR, "logs");
+
+const COMMANDS_DIR =
+    path.join(BASE_DIR, "commands");
+
+const MEDIA_DIR =
+    path.join(BASE_DIR, "media");
+
+const LOCAL_DB =
+    path.join(DATA_DIR, "deployed.json");
+
+const LOCAL_MULTI_DB =
+    path.join(DATA_DIR, "multi_sessions.json");
+
+/*
+============================================================
+ CREATE DIRECTORIES
+============================================================
+*/
+
+[
+    AUTH_DIR,
+    USERS_AUTH_DIR,
     DATA_DIR,
-    "deployed.json"
-);
-
-const SETTINGS_FILE = path.join(
-    DATA_DIR,
-    "settings.json"
-);
-
-const LOG_FILE = path.join(
-    DATA_DIR,
-    "logs.json"
-);
-
-const ADMIN_TOKEN =
-    process.env.ADMIN_TOKEN ||
-    "change-this-admin-token";
-
-const logger = pino({
-    level: "silent"
+    LOG_DIR,
+    COMMANDS_DIR,
+    MEDIA_DIR
+].forEach((dir) => {
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, {
+            recursive: true
+        });
+    }
 });
 
-/* =========================================================
-   MEMORY
-========================================================= */
+/*
+============================================================
+ LOGGER
+============================================================
+*/
+
+const logger = pino({
+    level:
+        process.env.LOG_LEVEL ||
+        "silent"
+});
+
+/*
+============================================================
+ RUNTIME STORAGE
+============================================================
+*/
 
 const sessions = new Map();
 
-const reconnecting = new Set();
+const deploymentLogs = new Map();
 
-let commands = new Map();
+const loadedCommands = new Map();
 
-/* =========================================================
-   DIRECTORIES
-========================================================= */
+/*
+============================================================
+ UTILITIES
+============================================================
+*/
 
-async function ensureDirectories() {
+function now() {
+    return new Date();
+}
 
-    await fsp.mkdir(
-        AUTH_DIR,
-        {
-            recursive: true
-        }
+function randomId(length = 12) {
+    return crypto
+        .randomBytes(
+            Math.ceil(length / 2)
+        )
+        .toString("hex")
+        .slice(0, length);
+}
+
+function generateSessionId() {
+    return (
+        "ETIAS-MINI-BOT~" +
+        randomId(24)
     );
+}
 
-    await fsp.mkdir(
-        DATA_DIR,
-        {
-            recursive: true
-        }
+function normalizeNumber(number) {
+    return String(number || "")
+        .replace(/\D/g, "");
+}
+
+function sanitizeSessionId(sessionId) {
+    return String(sessionId || "")
+        .replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+function getAuthPath(sessionId) {
+    return path.join(
+        USERS_AUTH_DIR,
+        sanitizeSessionId(sessionId)
     );
+}
 
-    await fsp.mkdir(
-        COMMANDS_DIR,
-        {
-            recursive: true
-        }
+function getLogFile(sessionId) {
+    return path.join(
+        LOG_DIR,
+        `${sanitizeSessionId(sessionId)}.log`
     );
+}
 
-    await fsp.mkdir(
-        PUBLIC_DIR,
-        {
-            recursive: true
-        }
-    );
-
-    if (!fs.existsSync(USERS_FILE)) {
-        await fsp.writeFile(
-            USERS_FILE,
-            "[]"
-        );
-    }
-
-    if (!fs.existsSync(SETTINGS_FILE)) {
-        await fsp.writeFile(
-            SETTINGS_FILE,
-            "{}"
-        );
-    }
-
-    if (!fs.existsSync(LOG_FILE)) {
-        await fsp.writeFile(
-            LOG_FILE,
-            "[]"
+function ensureFile(file, fallback) {
+    if (!fs.existsSync(file)) {
+        fs.writeFileSync(
+            file,
+            fallback
         );
     }
 }
 
-/* =========================================================
-   JSON STORAGE
-========================================================= */
+/*
+============================================================
+ LOCAL DATABASE
+============================================================
+*/
 
-async function readJSON(file, fallback) {
+function readLocalDatabase() {
+    ensureFile(
+        LOCAL_DB,
+        "{}"
+    );
 
     try {
-
         const data =
-            await fsp.readFile(
-                file,
+            fs.readFileSync(
+                LOCAL_DB,
                 "utf8"
             );
 
         return JSON.parse(data);
-
     } catch {
-
-        return fallback;
+        return {};
     }
 }
 
-async function writeJSON(
-    file,
-    data
-) {
-
-    await fsp.writeFile(
-        file,
+function writeLocalDatabase(data) {
+    fs.writeFileSync(
+        LOCAL_DB,
         JSON.stringify(
             data,
             null,
@@ -154,209 +229,640 @@ async function writeJSON(
     );
 }
 
-/* =========================================================
-   LOGGING
-========================================================= */
+function readLegacyDatabase() {
+    ensureFile(
+        LOCAL_MULTI_DB,
+        "{}"
+    );
 
-async function log(
-    level,
-    message,
-    number = null
+    try {
+        return JSON.parse(
+            fs.readFileSync(
+                LOCAL_MULTI_DB,
+                "utf8"
+            )
+        );
+    } catch {
+        return {};
+    }
+}
+
+/*
+============================================================
+ LOGGING
+============================================================
+*/
+
+function addLog(
+    sessionId,
+    message
 ) {
-
-    const entry = {
-        time:
-            new Date().toISOString(),
-
-        level,
-
-        number,
-
-        message
-    };
+    const text =
+        `[${new Date().toISOString()}] ${message}`;
 
     console.log(
-        `[${level.toUpperCase()}]`,
-        number
-            ? `[${number}]`
-            : "",
-        message
+        `[${sessionId}] ${message}`
     );
 
-    const logs =
-        await readJSON(
-            LOG_FILE,
+    if (!deploymentLogs.has(sessionId)) {
+        deploymentLogs.set(
+            sessionId,
             []
         );
+    }
 
-    logs.push(entry);
+    const list =
+        deploymentLogs.get(sessionId);
+
+    list.push(text);
+
+    if (list.length > 300) {
+        list.splice(
+            0,
+            list.length - 300
+        );
+    }
+
+    try {
+        fs.appendFileSync(
+            getLogFile(sessionId),
+            text + "\n"
+        );
+    } catch {}
+}
+
+function getLogs(sessionId) {
+    const memory =
+        deploymentLogs.get(sessionId);
+
+    if (memory) {
+        return [...memory];
+    }
+
+    try {
+        if (
+            fs.existsSync(
+                getLogFile(sessionId)
+            )
+        ) {
+            return fs
+                .readFileSync(
+                    getLogFile(sessionId),
+                    "utf8"
+                )
+                .split("\n")
+                .filter(Boolean)
+                .slice(-300);
+        }
+    } catch {}
+
+    return [];
+}
+
+/*
+============================================================
+ DEPLOYMENT SCHEMA
+============================================================
+*/
+
+const deploymentSchema =
+    new mongoose.Schema(
+        {
+            sessionId: {
+                type: String,
+                unique: true,
+                index: true
+            },
+
+            userId: {
+                type: String,
+                index: true
+            },
+
+            phone: String,
+
+            pairId: String,
+
+            status: {
+                type: String,
+                default: "created"
+            },
+
+            connected: {
+                type: Boolean,
+                default: false
+            },
+
+            mode: {
+                type: String,
+                default: "public"
+            },
+
+            days: Number,
+
+            expireAt: Date,
+
+            authFolder: String,
+
+            pairingCode: String,
+
+            reconnects: {
+                type: Number,
+                default: 0
+            },
+
+            messages: {
+                type: Number,
+                default: 0
+            },
+
+            commandCount: {
+                type: Number,
+                default: 0
+            },
+
+            createdAt: {
+                type: Date,
+                default: Date.now
+            },
+
+            lastSeen: Date
+        },
+        {
+            minimize: false
+        }
+    );
+
+const Deployment =
+    mongoose.models.ETIASDeployment ||
+    mongoose.model(
+        "ETIASDeployment",
+        deploymentSchema
+    );
+
+/*
+============================================================
+ MONGODB
+============================================================
+*/
+
+let mongoReady = false;
+
+async function connectMongo() {
+    if (!MONGO_URI) {
+        addLog(
+            "SYSTEM",
+            "MongoDB URI not configured. Using local database."
+        );
+
+        return false;
+    }
+
+    try {
+        if (
+            mongoose.connection.readyState === 1
+        ) {
+            mongoReady = true;
+            return true;
+        }
+
+        await mongoose.connect(
+            MONGO_URI,
+            {
+                serverSelectionTimeoutMS: 10000
+            }
+        );
+
+        mongoReady = true;
+
+        console.log(
+            "[MONGO] ✅ Connected"
+        );
+
+        return true;
+    } catch (error) {
+        mongoReady = false;
+
+        console.error(
+            "[MONGO] ❌",
+            error.message
+        );
+
+        return false;
+    }
+}
+
+/*
+============================================================
+ SAVE DEPLOYMENT
+============================================================
+*/
+
+async function updateSession(
+    session
+) {
+    const data = {
+        sessionId:
+            session.sessionId,
+
+        userId:
+            session.userId || null,
+
+        phone:
+            session.phone,
+
+        pairId:
+            session.pairId,
+
+        status:
+            session.status,
+
+        connected:
+            !!session.connected,
+
+        mode:
+            session.mode,
+
+        days:
+            session.days,
+
+        expireAt:
+            session.expireAt,
+
+        authFolder:
+            session.authFolder,
+
+        pairingCode:
+            session.pairingCode ||
+            null,
+
+        reconnects:
+            session.reconnects || 0,
+
+        messages:
+            session.messages || 0,
+
+        commandCount:
+            session.commandCount || 0,
+
+        createdAt:
+            session.createdAt,
+
+        lastSeen:
+            session.lastSeen ||
+            null
+    };
 
     /*
-     * Keep last 500 logs.
+     * Mongo
      */
-    const trimmed =
-        logs.slice(-500);
 
-    await writeJSON(
-        LOG_FILE,
-        trimmed
-    );
-}
+    if (mongoReady) {
+        try {
+            await Deployment.findOneAndUpdate(
+                {
+                    sessionId:
+                        session.sessionId
+                },
+                data,
+                {
+                    upsert: true,
+                    new: true
+                }
+            );
+        } catch (error) {
+            addLog(
+                session.sessionId,
+                `Mongo save failed: ${error.message}`
+            );
+        }
+    }
 
-/* =========================================================
-   PHONE NUMBER
-========================================================= */
+    /*
+     * Local
+     */
 
-function cleanNumber(number) {
+    try {
+        const db =
+            readLocalDatabase();
 
-    return String(
-        number || ""
-    )
-        .replace(
-            /\D/g,
-            ""
+        db[
+            session.sessionId
+        ] = data;
+
+        writeLocalDatabase(db);
+    } catch (error) {
+        addLog(
+            session.sessionId,
+            `Local save failed: ${error.message}`
         );
+    }
 }
 
-/* =========================================================
-   SESSION ID
-========================================================= */
+/*
+============================================================
+ REMOVE DEPLOYMENT
+============================================================
+*/
 
-function sessionName(number) {
+async function removeDeployment(
+    sessionId
+) {
+    if (mongoReady) {
+        try {
+            await Deployment.deleteOne({
+                sessionId
+            });
+        } catch {}
+    }
 
-    return cleanNumber(
-        number
-    );
+    try {
+        const db =
+            readLocalDatabase();
+
+        delete db[sessionId];
+
+        writeLocalDatabase(db);
+    } catch {}
 }
 
-function authPath(number) {
+/*
+============================================================
+ GET DEPLOYMENT
+============================================================
+*/
 
-    return path.join(
-        AUTH_DIR,
-        sessionName(number)
-    );
+async function findDeployment(
+    sessionId
+) {
+    if (sessions.has(sessionId)) {
+        return sessions.get(
+            sessionId
+        );
+    }
+
+    if (mongoReady) {
+        try {
+            const found =
+                await Deployment.findOne({
+                    sessionId
+                }).lean();
+
+            if (found) {
+                return found;
+            }
+        } catch {}
+    }
+
+    try {
+        const db =
+            readLocalDatabase();
+
+        return db[sessionId] ||
+            null;
+    } catch {
+        return null;
+    }
 }
 
-/* =========================================================
-   USERS
-========================================================= */
+/*
+============================================================
+ GET ALL DEPLOYMENTS
+============================================================
+*/
 
-async function getUsers() {
+async function getAllDeployments() {
+    const result = [];
 
-    return await readJSON(
-        USERS_FILE,
-        []
-    );
+    for (
+        const session of
+        sessions.values()
+    ) {
+        result.push(
+            sessionSummary(session)
+        );
+    }
+
+    if (result.length > 0) {
+        return result;
+    }
+
+    if (mongoReady) {
+        try {
+            return await Deployment
+                .find({})
+                .lean();
+        } catch {}
+    }
+
+    const db =
+        readLocalDatabase();
+
+    return Object.values(db);
 }
 
-async function saveUsers(users) {
+/*
+============================================================
+ SESSION SUMMARY
+============================================================
+*/
 
-    await writeJSON(
-        USERS_FILE,
-        users
-    );
+function sessionSummary(
+    session
+) {
+    return {
+        sessionId:
+            session.sessionId,
+
+        userId:
+            session.userId ||
+            null,
+
+        phone:
+            session.phone,
+
+        pairId:
+            session.pairId,
+
+        status:
+            session.status,
+
+        connected:
+            !!session.connected,
+
+        mode:
+            session.mode,
+
+        days:
+            session.days,
+
+        expireAt:
+            session.expireAt,
+
+        createdAt:
+            session.createdAt,
+
+        lastSeen:
+            session.lastSeen,
+
+        reconnects:
+            session.reconnects,
+
+        messages:
+            session.messages,
+
+        commandCount:
+            session.commandCount,
+
+        pairingCode:
+            session.pairingCode ||
+            null
+    };
 }
 
-async function findUser(number) {
+/*
+============================================================
+ CREATE SESSION
+============================================================
+*/
 
-    number =
-        cleanNumber(
-            number
+function createSession(
+    options = {}
+) {
+    const phone =
+        normalizeNumber(
+            options.phone
         );
 
-    const users =
-        await getUsers();
+    const sessionId =
+        options.sessionId ||
+        generateSessionId();
 
-    return users.find(
-        user =>
-            user.number ===
-            number
-    );
-}
+    const days =
+        Number(
+            options.days ||
+            DEFAULT_DAYS
+        );
 
-/* =========================================================
-   SETTINGS
-========================================================= */
+    const createdAt =
+        now();
 
-const DEFAULT_SETTINGS = {
-
-    mode: "public",
-
-    antilink: false,
-
-    antidelete: false,
-
-    antiviewonce: false,
-
-    viewonce: false,
-
-    welcome: true,
-
-    goodbye: true
-
-};
-
-async function getSettings(number) {
-
-    const all =
-        await readJSON(
-            SETTINGS_FILE,
-            {}
+    const expireAt =
+        new Date(
+            createdAt.getTime() +
+            days *
+                24 *
+                60 *
+                60 *
+                1000
         );
 
     return {
-        ...DEFAULT_SETTINGS,
-        ...(all[number] || {})
+        sessionId,
+
+        phone,
+
+        pairId:
+            options.pairId ||
+            randomId(12),
+
+        userId:
+            null,
+
+        sock:
+            null,
+
+        status:
+            "created",
+
+        connected:
+            false,
+
+        pairingCode:
+            null,
+
+        pairingRequested:
+            false,
+
+        mode:
+            options.mode ||
+            MODE,
+
+        days,
+
+        expireAt,
+
+        createdAt,
+
+        lastSeen:
+            null,
+
+        reconnects:
+            0,
+
+        messages:
+            0,
+
+        commandCount:
+            0,
+
+        stopping:
+            false,
+
+        reconnectTimer:
+            null,
+
+        pairingTimer:
+            null,
+
+        authFolder:
+            getAuthPath(
+                sessionId
+            ),
+
+        antiLink:
+            false,
+
+        antiDelete:
+            false,
+
+        antiViewOnce:
+            false
     };
 }
 
-async function saveSettings(
-    number,
-    settings
-) {
+/*
+============================================================
+ COMMAND LOADER
+============================================================
+*/
 
-    const all =
-        await readJSON(
-            SETTINGS_FILE,
-            {}
-        );
-
-    all[number] = {
-        ...DEFAULT_SETTINGS,
-        ...settings
-    };
-
-    await writeJSON(
-        SETTINGS_FILE,
-        all
-    );
-}
-
-/* =========================================================
-   COMMAND LOADER
-========================================================= */
-
-async function loadCommands() {
-
-    commands.clear();
+function loadCommands() {
+    loadedCommands.clear();
 
     if (
         !fs.existsSync(
             COMMANDS_DIR
         )
     ) {
+        addLog(
+            "SYSTEM",
+            "commands directory not found"
+        );
+
         return;
     }
 
     const files =
-        await fsp.readdir(
+        fs.readdirSync(
             COMMANDS_DIR
         );
+
+    let count = 0;
 
     for (
         const file of files
     ) {
-
         if (
             !file.endsWith(".js")
         ) {
@@ -364,7 +870,6 @@ async function loadCommands() {
         }
 
         try {
-
             const fullPath =
                 path.join(
                     COMMANDS_DIR,
@@ -380,1135 +885,1165 @@ async function loadCommands() {
             const command =
                 require(fullPath);
 
-            const name =
-                command.name ||
-                path.basename(
-                    file,
-                    ".js"
-                );
+            if (
+                !command ||
+                typeof command !==
+                    "object"
+            ) {
+                continue;
+            }
 
-            commands.set(
-                name.toLowerCase(),
-                command
-            );
+            const names = [];
+
+            if (
+                command.name
+            ) {
+                names.push(
+                    String(
+                        command.name
+                    ).toLowerCase()
+                );
+            }
+
+            if (
+                Array.isArray(
+                    command.alias
+                )
+            ) {
+                command.alias.forEach(
+                    (alias) =>
+                        names.push(
+                            String(
+                                alias
+                            ).toLowerCase()
+                        )
+                );
+            }
 
             if (
                 Array.isArray(
                     command.aliases
                 )
             ) {
-
-                for (
-                    const alias
-                    of command.aliases
-                ) {
-
-                    commands.set(
-                        alias.toLowerCase(),
-                        command
-                    );
-                }
+                command.aliases.forEach(
+                    (alias) =>
+                        names.push(
+                            String(
+                                alias
+                            ).toLowerCase()
+                        )
+                );
             }
 
+            if (
+                names.length === 0
+            ) {
+                continue;
+            }
+
+            for (
+                const name of names
+            ) {
+                loadedCommands.set(
+                    name,
+                    command
+                );
+            }
+
+            count++;
         } catch (error) {
-
             console.error(
-                `[COMMAND ERROR] ${file}`,
-                error
-            );
-        }
-    }
-
-    console.log(
-        `[COMMANDS] ${commands.size} commands loaded`
-    );
-}
-
-/* =========================================================
-   MESSAGE TEXT
-========================================================= */
-
-function getMessageText(
-    message
-) {
-
-    if (!message) {
-        return "";
-    }
-
-    if (
-        message.conversation
-    ) {
-        return message.conversation;
-    }
-
-    if (
-        message.extendedTextMessage
-    ) {
-        return (
-            message
-                .extendedTextMessage
-                .text ||
-            ""
-        );
-    }
-
-    if (
-        message.imageMessage
-    ) {
-        return (
-            message
-                .imageMessage
-                .caption ||
-            ""
-        );
-    }
-
-    if (
-        message.videoMessage
-    ) {
-        return (
-            message
-                .videoMessage
-                .caption ||
-            ""
-        );
-    }
-
-    if (
-        message.documentMessage
-    ) {
-        return (
-            message
-                .documentMessage
-                .caption ||
-            ""
-        );
-    }
-
-    return "";
-}
-
-/* =========================================================
-   UNWRAP MESSAGE
-========================================================= */
-
-function unwrapMessage(
-    message
-) {
-
-    if (
-        message?.ephemeralMessage
-    ) {
-        return unwrapMessage(
-            message.ephemeralMessage.message
-        );
-    }
-
-    if (
-        message?.viewOnceMessage
-    ) {
-        return unwrapMessage(
-            message.viewOnceMessage.message
-        );
-    }
-
-    if (
-        message?.viewOnceMessageV2
-    ) {
-        return unwrapMessage(
-            message.viewOnceMessageV2.message
-        );
-    }
-
-    if (
-        message?.viewOnceMessageV2Extension
-    ) {
-        return unwrapMessage(
-            message
-                .viewOnceMessageV2Extension
-                .message
-        );
-    }
-
-    return message;
-}
-
-/* =========================================================
-   ADMIN CHECK
-========================================================= */
-
-function isAdminRequest(
-    req
-) {
-
-    const token =
-        req.headers[
-            "x-admin-token"
-        ] ||
-        req.query.token ||
-        req.body?.token;
-
-    return token ===
-        ADMIN_TOKEN;
-}
-
-function requireAdmin(
-    req,
-    res,
-    next
-) {
-
-    if (
-        !isAdminRequest(
-            req
-        )
-    ) {
-
-        return res.status(
-            401
-        ).json({
-            success: false,
-            error:
-                "Unauthorized"
-        });
-    }
-
-    next();
-}
-
-/* =========================================================
-   GROUP ADMIN
-========================================================= */
-
-async function isGroupAdmin(
-    sock,
-    jid,
-    participant
-) {
-
-    try {
-
-        const metadata =
-            await sock.groupMetadata(
-                jid
-            );
-
-        const member =
-            metadata.participants.find(
-                p =>
-                    p.id ===
-                    participant
-            );
-
-        return Boolean(
-            member &&
-            (
-                member.admin ===
-                    "admin" ||
-                member.admin ===
-                    "superadmin"
-            )
-        );
-
-    } catch {
-
-        return false;
-    }
-}
-
-/* =========================================================
-   ANTILINK
-========================================================= */
-
-const LINK_REGEX =
-    /(https?:\/\/|www\.|chat\.whatsapp\.com\/|t\.me\/|discord\.gg\/)/i;
-
-async function handleAntilink(
-    sock,
-    message,
-    settings
-) {
-
-    if (
-        !settings.antilink
-    ) {
-        return false;
-    }
-
-    const jid =
-        message.key.remoteJid;
-
-    if (
-        !jid ||
-        !jid.endsWith("@g.us")
-    ) {
-        return false;
-    }
-
-    const sender =
-        message.key.participant;
-
-    const text =
-        getMessageText(
-            message.message
-        );
-
-    if (
-        !LINK_REGEX.test(
-            text
-        )
-    ) {
-        return false;
-    }
-
-    /*
-     * Don't remove group admins.
-     */
-    if (
-        await isGroupAdmin(
-            sock,
-            jid,
-            sender
-        )
-    ) {
-        return false;
-    }
-
-    try {
-
-        await sock.sendMessage(
-            jid,
-            {
-                delete:
-                    message.key
-            }
-        );
-
-        await sock.sendMessage(
-            jid,
-            {
-                text:
-                    "🚫 Links are not allowed in this group."
-            }
-        );
-
-        return true;
-
-    } catch (error) {
-
-        console.error(
-            "[ANTILINK]",
-            error.message
-        );
-
-        return false;
-    }
-}
-
-/* =========================================================
-   WELCOME / GOODBYE
-========================================================= */
-
-async function handleGroupParticipants(
-    sock,
-    update,
-    settings
-) {
-
-    if (
-        !settings.welcome &&
-        !settings.goodbye
-    ) {
-        return;
-    }
-
-    const {
-        id,
-        participants,
-        action
-    } = update;
-
-    if (
-        action === "add" &&
-        settings.welcome
-    ) {
-
-        for (
-            const participant
-            of participants
-        ) {
-
-            await sock.sendMessage(
-                id,
-                {
-                    text:
-                        `👋 Welcome @${participant.split("@")[0]}!\n\n` +
-                        `Welcome to the group. Enjoy your stay!`,
-                    mentions: [
-                        participant
-                    ]
-                }
-            );
-        }
-    }
-
-    if (
-        (
-            action === "remove" ||
-            action === "leave"
-        ) &&
-        settings.goodbye
-    ) {
-
-        for (
-            const participant
-            of participants
-        ) {
-
-            await sock.sendMessage(
-                id,
-                {
-                    text:
-                        `👋 Goodbye @${participant.split("@")[0]}!`,
-                    mentions: [
-                        participant
-                    ]
-                }
-            );
-        }
-    }
-}
-
-/* =========================================================
-   ANTIVIEWONCE / VIEWONCE
-========================================================= */
-
-async function handleViewOnce(
-    sock,
-    message,
-    settings
-) {
-
-    if (
-        !message.message
-    ) {
-        return false;
-    }
-
-    const raw =
-        message.message;
-
-    const isViewOnce =
-        Boolean(
-            raw.viewOnceMessage ||
-            raw.viewOnceMessageV2 ||
-            raw.viewOnceMessageV2Extension
-        );
-
-    if (
-        !isViewOnce
-    ) {
-        return false;
-    }
-
-    if (
-        !settings.antiviewonce &&
-        !settings.viewonce
-    ) {
-        return false;
-    }
-
-    const unwrapped =
-        unwrapMessage(
-            raw
-        );
-
-    const content =
-        unwrapped;
-
-    const remoteJid =
-        message.key.remoteJid;
-
-    /*
-     * If viewonce mode is enabled,
-     * re-send the media without view-once.
-     */
-    if (
-        settings.viewonce
-    ) {
-
-        try {
-
-            if (
-                content.imageMessage
-            ) {
-
-                const buffer =
-                    await downloadMediaMessage(
-                        message,
-                        "buffer",
-                        {},
-                        {
-                            logger,
-                            reuploadRequest:
-                                sock.updateMediaMessage
-                        }
-                    );
-
-                await sock.sendMessage(
-                    remoteJid,
-                    {
-                        image: buffer,
-                        caption:
-                            content
-                                .imageMessage
-                                .caption ||
-                            ""
-                    }
-                );
-
-                return true;
-            }
-
-            if (
-                content.videoMessage
-            ) {
-
-                const buffer =
-                    await downloadMediaMessage(
-                        message,
-                        "buffer",
-                        {},
-                        {
-                            logger,
-                            reuploadRequest:
-                                sock.updateMediaMessage
-                        }
-                    );
-
-                await sock.sendMessage(
-                    remoteJid,
-                    {
-                        video: buffer,
-                        caption:
-                            content
-                                .videoMessage
-                                .caption ||
-                            ""
-                    }
-                );
-
-                return true;
-            }
-
-            if (
-                content.audioMessage
-            ) {
-
-                const buffer =
-                    await downloadMediaMessage(
-                        message,
-                        "buffer",
-                        {},
-                        {
-                            logger,
-                            reuploadRequest:
-                                sock.updateMediaMessage
-                        }
-                    );
-
-                await sock.sendMessage(
-                    remoteJid,
-                    {
-                        audio: buffer,
-                        mimetype:
-                            content
-                                .audioMessage
-                                .mimetype ||
-                            "audio/mpeg"
-                    }
-                );
-
-                return true;
-            }
-
-        } catch (error) {
-
-            console.error(
-                "[VIEWONCE]",
+                `[COMMAND] Failed ${file}:`,
                 error.message
             );
         }
     }
 
-    /*
-     * antiviewonce is enabled but
-     * viewonce forwarding isn't enabled.
-     */
+    console.log(
+        `[COMMANDS] ${count} commands loaded`
+    );
+}
+
+/*
+============================================================
+ TEXT EXTRACTION
+============================================================
+*/
+
+function getMessageText(
+    message
+) {
+    if (!message) {
+        return "";
+    }
+
+    const msg =
+        message.message;
+
+    if (!msg) {
+        return "";
+    }
+
     if (
-        settings.antiviewonce
+        typeof msg.conversation ===
+        "string"
     ) {
+        return msg.conversation;
+    }
 
-        try {
+    if (
+        msg.extendedTextMessage
+            ?.text
+    ) {
+        return msg
+            .extendedTextMessage
+            .text;
+    }
 
-            await sock.sendMessage(
-                remoteJid,
-                {
-                    text:
-                        "👁️ View-once media detected."
-                }
-            );
+    if (
+        msg.imageMessage
+            ?.caption
+    ) {
+        return msg
+            .imageMessage
+            .caption;
+    }
 
-        } catch {}
+    if (
+        msg.videoMessage
+            ?.caption
+    ) {
+        return msg
+            .videoMessage
+            .caption;
+    }
 
+    if (
+        msg.documentMessage
+            ?.caption
+    ) {
+        return msg
+            .documentMessage
+            .caption;
+    }
+
+    return "";
+}
+
+/*
+============================================================
+ OWNER CHECK
+============================================================
+*/
+
+function isOwner(
+    jid,
+    session
+) {
+    if (
+        !OWNER_NUMBER
+    ) {
+        return false;
+    }
+
+    const sender =
+        String(jid || "")
+            .split("@")[0]
+            .split(":")[0]
+            .replace(/\D/g, "");
+
+    if (
+        sender &&
+        sender === OWNER_NUMBER
+    ) {
+        return true;
+    }
+
+    if (
+        session?.phone &&
+        sender === session.phone
+    ) {
         return true;
     }
 
     return false;
 }
 
-/* =========================================================
-   COMMAND HANDLER
-========================================================= */
+/*
+============================================================
+ REPLY
+============================================================
+*/
 
-async function handleCommand(
+async function reply(
     sock,
-    message,
-    user
+    jid,
+    text,
+    quoted
 ) {
+    try {
+        return await sock.sendMessage(
+            jid,
+            {
+                text: String(text)
+            },
+            quoted
+                ? {
+                      quoted
+                  }
+                : undefined
+        );
+    } catch (error) {
+        addLog(
+            "SYSTEM",
+            `Reply failed: ${error.message}`
+        );
+    }
+}
 
-    const settings =
-        await getSettings(
-            user.number
+/*
+============================================================
+ SEND SESSION ID
+============================================================
+*/
+
+async function sendSessionId(
+    session
+) {
+    if (
+        !session.sock ||
+        !session.userId
+    ) {
+        return;
+    }
+
+    try {
+        const jid =
+            jidNormalizedUser(
+                session.userId
+            );
+
+        const text =
+`╭━━━〔 ${BOT_NAME} 〕━━━╮
+
+✅ BOT CONNECTED
+
+📱 Number:
++${session.phone}
+
+🆔 SESSION ID:
+${session.sessionId}
+
+📅 DAYS:
+${session.days}
+
+⏰ EXPIRES:
+${session.expireAt.toISOString()}
+
+🤖 MODE:
+${session.mode}
+
+╰━━━━━━━━━━━━━━━━╯
+
+⚡ ${BOT_NAME}
+Bringing AI to your fingertips`;
+
+        await session.sock.sendMessage(
+            jid,
+            {
+                text
+            }
         );
 
-    const body =
+        addLog(
+            session.sessionId,
+            "Session ID sent to WhatsApp"
+        );
+    } catch (error) {
+        addLog(
+            session.sessionId,
+            `Could not send session ID: ${error.message}`
+        );
+    }
+}
+
+/*
+============================================================
+ PAIRING CODE
+============================================================
+*/
+
+async function requestPairingCode(
+    session
+) {
+    if (
+        !session.sock ||
+        !session.phone
+    ) {
+        return null;
+    }
+
+    if (
+        session.pairingRequested
+    ) {
+        return session.pairingCode;
+    }
+
+    try {
+        session.pairingRequested =
+            true;
+
+        addLog(
+            session.sessionId,
+            `Requesting WhatsApp pairing code for +${session.phone}`
+        );
+
+        /*
+         * Baileys returns an 8-character
+         * WhatsApp pairing code.
+         */
+
+        const code =
+            await session.sock
+                .requestPairingCode(
+                    session.phone
+                );
+
+        session.pairingCode =
+            String(code || "")
+                .toUpperCase();
+
+        session.status =
+            "pairing";
+
+        await updateSession(
+            session
+        );
+
+        addLog(
+            session.sessionId,
+            `🔐 PAIRING CODE: ${session.pairingCode}`
+        );
+
+        console.log("");
+        console.log(
+            "=========================================="
+        );
+        console.log(
+            ` ${BOT_NAME} PAIRING CODE`
+        );
+        console.log(
+            "=========================================="
+        );
+        console.log(
+            ` PHONE : +${session.phone}`
+        );
+        console.log(
+            ` CODE  : ${session.pairingCode}`
+        );
+        console.log(
+            ` SID   : ${session.sessionId}`
+        );
+        console.log(
+            "=========================================="
+        );
+        console.log("");
+
+        return session.pairingCode;
+    } catch (error) {
+        session.pairingRequested =
+            false;
+
+        session.status =
+            "pairing_error";
+
+        addLog(
+            session.sessionId,
+            `Pairing code failed: ${error.message}`
+        );
+
+        return null;
+    }
+}
+
+/*
+============================================================
+ MESSAGE PROCESSING
+============================================================
+*/
+
+async function processMessage(
+    session,
+    message
+) {
+    if (
+        !session.sock ||
+        !message
+    ) {
+        return;
+    }
+
+    if (
+        message.key?.fromMe
+    ) {
+        return;
+    }
+
+    const remoteJid =
+        message.key?.remoteJid;
+
+    if (!remoteJid) {
+        return;
+    }
+
+    const text =
         getMessageText(
-            message.message
+            message
+        ).trim();
+
+    if (!text) {
+        return;
+    }
+
+    session.messages++;
+    session.lastSeen =
+        now();
+
+    await updateSession(
+        session
+    );
+
+    /*
+     * Anti-link
+     */
+
+    if (
+        session.antiLink &&
+        /https?:\/\/|www\./i.test(text) &&
+        remoteJid.endsWith("@g.us")
+    ) {
+        try {
+            await session.sock.sendMessage(
+                remoteJid,
+                {
+                    delete:
+                        message.key
+                }
+            );
+        } catch {}
+
+        return;
+    }
+
+    if (
+        !text.startsWith(PREFIX)
+    ) {
+        return;
+    }
+
+    const body =
+        text.slice(
+            PREFIX.length
         ).trim();
 
     if (!body) {
-        return false;
+        return;
     }
 
-    const prefix =
-        process.env.PREFIX ||
-        ".";
-
-    if (
-        !body.startsWith(
-            prefix
-        )
-    ) {
-        return false;
-    }
-
-    const args =
-        body
-            .slice(
-                prefix.length
-            )
-            .trim()
-            .split(/\s+/);
+    const parts =
+        body.split(/\s+/);
 
     const commandName =
-        (
-            args.shift() ||
+        String(
+            parts.shift() ||
             ""
         ).toLowerCase();
 
-    if (!commandName) {
-        return false;
+    const args =
+        parts;
+
+    const argText =
+        args.join(" ");
+
+    const owner =
+        isOwner(
+            message.key?.participant ||
+            message.key?.remoteJid,
+            session
+        );
+
+    /*
+     * Built-in commands
+     */
+
+    if (
+        commandName === "ping"
+    ) {
+        await reply(
+            session.sock,
+            remoteJid,
+            `🏓 ${BOT_NAME} online!\n\n⏱ ${Math.floor(process.uptime())} seconds`
+        );
+
+        return;
     }
 
+    if (
+        commandName === "alive"
+    ) {
+        await reply(
+            session.sock,
+            remoteJid,
+`╭━━━〔 ${BOT_NAME} 〕━━━╮
+
+✅ ONLINE
+
+📱 +${session.phone}
+
+🆔 ${session.sessionId}
+
+⏰ ${session.expireAt.toISOString()}
+
+⚡ Bringing AI to your fingertips
+
+╰━━━━━━━━━━━━━━━━╯`
+        );
+
+        return;
+    }
+
+    if (
+        commandName === "session"
+    ) {
+        if (!owner) {
+            return;
+        }
+
+        await reply(
+            session.sock,
+            remoteJid,
+`🆔 SESSION ID
+
+${session.sessionId}
+
+📱 +${session.phone}
+
+⏰ ${session.expireAt.toISOString()}`
+        );
+
+        return;
+    }
+
+    if (
+        commandName === "status"
+    ) {
+        await reply(
+            session.sock,
+            remoteJid,
+`🤖 ${BOT_NAME}
+
+Status: ${
+    session.connected
+        ? "ONLINE"
+        : "OFFLINE"
+}
+
+Mode: ${session.mode}
+
+Messages: ${session.messages}
+
+Commands: ${session.commandCount}
+
+Reconnects: ${session.reconnects}`
+        );
+
+        return;
+    }
+
+    if (
+        commandName === "mode"
+    ) {
+        if (!owner) {
+            return;
+        }
+
+        const newMode =
+            String(
+                args[0] ||
+                ""
+            ).toLowerCase();
+
+        if (
+            ![
+                "public",
+                "private"
+            ].includes(newMode)
+        ) {
+            await reply(
+                session.sock,
+                remoteJid,
+                `Usage: ${PREFIX}mode public\nor\n${PREFIX}mode private`
+            );
+
+            return;
+        }
+
+        session.mode =
+            newMode;
+
+        await updateSession(
+            session
+        );
+
+        await reply(
+            session.sock,
+            remoteJid,
+            `✅ Mode changed to ${newMode}`
+        );
+
+        return;
+    }
+
+    if (
+        commandName === "antilink"
+    ) {
+        if (!owner) {
+            return;
+        }
+
+        const state =
+            String(
+                args[0] ||
+                ""
+            ).toLowerCase();
+
+        session.antiLink =
+            state === "on";
+
+        await reply(
+            session.sock,
+            remoteJid,
+            `🔗 Anti-link: ${
+                session.antiLink
+                    ? "ON"
+                    : "OFF"
+            }`
+        );
+
+        return;
+    }
+
+    if (
+        commandName === "antidelete"
+    ) {
+        if (!owner) {
+            return;
+        }
+
+        const state =
+            String(
+                args[0] ||
+                ""
+            ).toLowerCase();
+
+        session.antiDelete =
+            state === "on";
+
+        await reply(
+            session.sock,
+            remoteJid,
+            `🗑️ Anti-delete: ${
+                session.antiDelete
+                    ? "ON"
+                    : "OFF"
+            }`
+        );
+
+        return;
+    }
+
+    if (
+        commandName === "viewonce"
+    ) {
+        if (!owner) {
+            return;
+        }
+
+        session.antiViewOnce =
+            true;
+
+        await reply(
+            session.sock,
+            remoteJid,
+            "👁️ View-once handling enabled."
+        );
+
+        return;
+    }
+
+    /*
+     * Help
+     */
+
+    if (
+        commandName === "menu" ||
+        commandName === "help"
+    ) {
+        await reply(
+            session.sock,
+            remoteJid,
+`╭━━━〔 ${BOT_NAME} 〕━━━╮
+
+📌 COMMAND MENU
+
+${PREFIX}ping
+${PREFIX}alive
+${PREFIX}status
+${PREFIX}session
+${PREFIX}menu
+
+OWNER
+
+${PREFIX}mode public
+${PREFIX}mode private
+${PREFIX}antilink on
+${PREFIX}antilink off
+${PREFIX}antidelete on
+${PREFIX}antidelete off
+
+╰━━━━━━━━━━━━━━━━╯`
+        );
+
+        return;
+    }
+
+    /*
+     * Private mode
+     */
+
+    if (
+        session.mode ===
+            "private" &&
+        !owner
+    ) {
+        return;
+    }
+
+    /*
+     * External commands
+     */
+
     const command =
-        commands.get(
+        loadedCommands.get(
             commandName
         );
 
     if (!command) {
-        return false;
+        return;
     }
 
-    const context = {
+    session.commandCount++;
 
-        sock,
+    await updateSession(
+        session
+    );
+
+    const context = {
+        sock:
+            session.sock,
+
+        client:
+            session.sock,
+
+        session,
 
         message,
 
-        user,
+        msg:
+            message,
 
-        settings,
+        jid:
+            remoteJid,
 
         args,
 
         text:
-            args.join(" "),
+            argText,
 
-        prefix,
+        body,
 
-        jid:
-            message.key.remoteJid,
+        command:
+            commandName,
 
-        sender:
-            message.key.participant ||
-            message.key.remoteJid,
+        prefix:
+            PREFIX,
 
-        isGroup:
-            Boolean(
-                message.key.remoteJid &&
-                message.key.remoteJid.endsWith(
-                    "@g.us"
-                )
-            ),
+        commandPrefix:
+            PREFIX,
 
-        reply: async text => {
+        sessionId:
+            session.sessionId,
 
-            return sock.sendMessage(
-                message.key.remoteJid,
-                {
-                    text
-                },
-                {
-                    quoted:
-                        message
-                }
-            );
-        }
+        botName:
+            BOT_NAME,
+
+        isOwner:
+            owner,
+
+        owner,
+
+        reply: async (
+            response
+        ) =>
+            reply(
+                session.sock,
+                remoteJid,
+                response,
+                message
+            )
     };
 
     try {
+        if (
+            typeof command.execute ===
+            "function"
+        ) {
+            await command.execute(
+                context
+            );
+
+            return;
+        }
+
+        if (
+            typeof command.run ===
+            "function"
+        ) {
+            await command.run(
+                context
+            );
+
+            return;
+        }
+
+        if (
+            typeof command.handler ===
+            "function"
+        ) {
+            await command.handler(
+                context
+            );
+
+            return;
+        }
 
         if (
             typeof command ===
             "function"
         ) {
-
             await command(
                 context
             );
-
-        } else if (
-            typeof command.execute ===
-            "function"
-        ) {
-
-            await command.execute(
-                context
-            );
-
-        } else if (
-            typeof command.run ===
-            "function"
-        ) {
-
-            await command.run(
-                context
-            );
-
-        } else if (
-            typeof command.handler ===
-            "function"
-        ) {
-
-            await command.handler(
-                context
-            );
         }
-
-        return true;
-
     } catch (error) {
-
-        console.error(
-            `[COMMAND ERROR] ${commandName}`,
-            error
+        addLog(
+            session.sessionId,
+            `Command ${commandName} failed: ${error.message}`
         );
 
-        await context.reply(
-            "❌ Command error: " +
-            error.message
+        await reply(
+            session.sock,
+            remoteJid,
+            `❌ Command error: ${error.message}`
         );
-
-        return true;
     }
 }
 
-/* =========================================================
-   BUILT-IN MODE COMMANDS
-========================================================= */
+/*
+============================================================
+ CONNECTION UPDATE
+============================================================
+*/
 
-async function handleBuiltIn(
-    sock,
-    message,
-    user
+async function handleConnectionUpdate(
+    session,
+    update
 ) {
-
-    const body =
-        getMessageText(
-            message.message
-        ).trim();
-
-    const prefix =
-        process.env.PREFIX ||
-        ".";
+    const {
+        connection,
+        lastDisconnect
+    } = update;
 
     if (
-        !body.startsWith(
-            prefix
-        )
+        connection === "connecting"
     ) {
-        return false;
-    }
+        session.status =
+            "connecting";
 
-    const args =
-        body
-            .slice(
-                prefix.length
-            )
-            .trim()
-            .split(/\s+/);
-
-    const cmd =
-        (
-            args.shift() ||
-            ""
-        ).toLowerCase();
-
-    if (
-        cmd !== "mode"
-    ) {
-        return false;
-    }
-
-    const mode =
-        (
-            args[0] ||
-            ""
-        ).toLowerCase();
-
-    if (
-        ![
-            "public",
-            "private"
-        ].includes(
-            mode
-        )
-    ) {
-
-        await sock.sendMessage(
-            message.key.remoteJid,
-            {
-                text:
-                    "Usage: .mode public\n" +
-                    "or\n" +
-                    ".mode private"
-            }
+        await updateSession(
+            session
         );
 
-        return true;
-    }
-
-    await saveSettings(
-        user.number,
-        {
-            ...(await getSettings(
-                user.number
-            )),
-            mode
-        }
-    );
-
-    await sock.sendMessage(
-        message.key.remoteJid,
-        {
-            text:
-                `✅ Bot mode changed to: ${mode}`
-        }
-    );
-
-    return true;
-}
-
-/* =========================================================
-   MESSAGE HANDLER
-========================================================= */
-
-async function handleMessage(
-    sock,
-    message,
-    user
-) {
-
-    if (
-        !message ||
-        !message.message
-    ) {
-        return;
+        addLog(
+            session.sessionId,
+            "🔄 Connecting to WhatsApp..."
+        );
     }
 
     if (
-        message.key.fromMe
+        connection === "open"
     ) {
-        return;
-    }
+        session.connected =
+            true;
 
-    const settings =
-        await getSettings(
-            user.number
+        session.status =
+            "online";
+
+        session.lastSeen =
+            now();
+
+        session.userId =
+            session.sock?.user?.id ||
+            session.userId;
+
+        session.pairingCode =
+            null;
+
+        session.pairingRequested =
+            true;
+
+        await updateSession(
+            session
         );
 
-    /*
-     * Expiry check.
-     */
-    if (
-        user.expiresAt &&
-        Date.now() >
-            new Date(
-                user.expiresAt
-            ).getTime()
-    ) {
+        addLog(
+            session.sessionId,
+            "✅ WhatsApp connection OPEN"
+        );
 
-        await log(
-            "warn",
-            "Session expired",
-            user.number
+        addLog(
+            session.sessionId,
+            `👤 Logged in as ${session.userId || "unknown"}`
+        );
+
+        await sendSessionId(
+            session
         );
 
         return;
     }
 
-    /*
-     * View-once handling.
-     */
-    const viewOnceHandled =
-        await handleViewOnce(
-            sock,
-            message,
-            settings
+    if (
+        connection === "close"
+    ) {
+        session.connected =
+            false;
+
+        session.status =
+            "offline";
+
+        await updateSession(
+            session
         );
 
-    if (
-        viewOnceHandled
-    ) {
-        return;
-    }
+        let statusCode =
+            null;
 
-    /*
-     * Antilink.
-     */
-    const linkHandled =
-        await handleAntilink(
-            sock,
-            message,
-            settings
+        try {
+            statusCode =
+                lastDisconnect
+                    ?.error
+                    ?.output
+                    ?.statusCode;
+        } catch {}
+
+        addLog(
+            session.sessionId,
+            `❌ WhatsApp connection closed. Code: ${statusCode || "unknown"}`
         );
 
-    if (
-        linkHandled
-    ) {
-        return;
-    }
+        const loggedOut =
+            statusCode ===
+            DisconnectReason.loggedOut;
 
-    /*
-     * Public/private mode.
-     */
-    const body =
-        getMessageText(
-            message.message
-        ).trim();
+        const badSession =
+            statusCode ===
+            DisconnectReason.badSession;
 
-    const prefix =
-        process.env.PREFIX ||
-        ".";
+        const connectionReplaced =
+            statusCode ===
+            DisconnectReason.connectionReplaced;
 
-    const isCommand =
-        body.startsWith(
-            prefix
-        );
+        const restartRequired =
+            statusCode ===
+            DisconnectReason.restartRequired;
 
-    if (
-        settings.mode ===
-            "private" &&
-        !isCommand
-    ) {
-        return;
-    }
+        if (
+            session.stopping ||
+            loggedOut ||
+            badSession ||
+            connectionReplaced
+        ) {
+            session.status =
+                "stopped";
 
-    /*
-     * Built-in commands.
-     */
-    const builtIn =
-        await handleBuiltIn(
-            sock,
-            message,
-            user
-        );
-
-    if (
-        builtIn
-    ) {
-        return;
-    }
-
-    /*
-     * External commands.
-     */
-    await handleCommand(
-        sock,
-        message,
-        user
-    );
-}
-
-/* =========================================================
-   ANTIDELETE
-========================================================= */
-
-function setupAntidelete(
-    sock,
-    user
-) {
-
-    sock.ev.on(
-        "messages.delete",
-        async event => {
-
-            const settings =
-                await getSettings(
-                    user.number
-                );
-
-            if (
-                !settings.antidelete
-            ) {
-                return;
-            }
-
-            await log(
-                "info",
-                "Message deletion event received",
-                user.number
+            await updateSession(
+                session
             );
 
-            /*
-             * Full recovery of deleted media/text
-             * requires a message store. This handler
-             * records the event without claiming
-             * deleted content can always be recovered.
-             */
-            try {
+            addLog(
+                session.sessionId,
+                "🛑 Session will not automatically reconnect."
+            );
 
-                if (
-                    event?.keys?.length
-                ) {
+            return;
+        }
 
-                    for (
-                        const key
-                        of event.keys
-                    ) {
+        /*
+         * Reconnect
+         */
 
-                        console.log(
-                            `[ANTIDELETE] Deleted message in ${key.remoteJid}`
+        if (
+            session.reconnectTimer
+        ) {
+            clearTimeout(
+                session.reconnectTimer
+            );
+        }
+
+        session.reconnects++;
+
+        const delay =
+            restartRequired
+                ? 1000
+                : 5000;
+
+        addLog(
+            session.sessionId,
+            `♻️ Reconnecting in ${delay / 1000}s...`
+        );
+
+        session.reconnectTimer =
+            setTimeout(
+                async () => {
+                    try {
+                        session.sock =
+                            null;
+
+                        session.pairingRequested =
+                            false;
+
+                        await connectSession(
+                            session
+                        );
+                    } catch (error) {
+                        addLog(
+                            session.sessionId,
+                            `Reconnect failed: ${error.message}`
                         );
                     }
-                }
-
-            } catch (
-                error
-            ) {
-
-                console.error(
-                    "[ANTIDELETE]",
-                    error.message
-                );
-            }
-        }
-    );
+                },
+                delay
+            );
+    }
 }
 
-/* =========================================================
-   CONNECT SESSION
-========================================================= */
+/*
+============================================================
+ CREATE SOCKET
+============================================================
+*/
 
 async function connectSession(
-    user
+    session
 ) {
+    if (!session) {
+        throw new Error(
+            "Session is required"
+        );
+    }
 
-    const number =
-        cleanNumber(
-            user.number
+    if (
+        session.stopping
+    ) {
+        return session;
+    }
+
+    if (
+        session.expireAt &&
+        new Date() >
+            new Date(
+                session.expireAt
+            )
+    ) {
+        session.status =
+            "expired";
+
+        await updateSession(
+            session
         );
 
-    const folder =
-        authPath(
-            number
+        addLog(
+            session.sessionId,
+            "⏰ Session expired"
         );
+
+        return session;
+    }
+
+    if (
+        session.sock
+    ) {
+        try {
+            if (
+                session.connected
+            ) {
+                return session;
+            }
+        } catch {}
+    }
+
+    /*
+     * Auth directory
+     */
 
     if (
         !fs.existsSync(
-            path.join(
-                folder,
-                "creds.json"
-            )
+            session.authFolder
         )
     ) {
-
-        await log(
-            "error",
-            "creds.json not found",
-            number
+        fs.mkdirSync(
+            session.authFolder,
+            {
+                recursive: true
+            }
         );
-
-        return;
     }
 
-    if (
-        sessions.has(
-            number
-        )
-    ) {
-
-        const existing =
-            sessions.get(
-                number
-            );
-
-        if (
-            existing.socket
-        ) {
-            return existing.socket;
-        }
-    }
-
-    await log(
-        "info",
-        "Connecting WhatsApp session...",
-        number
+    addLog(
+        session.sessionId,
+        `Auth folder: ${session.authFolder}`
     );
+
+    /*
+     * Multi-file authentication
+     */
 
     const {
         state,
         saveCreds
     } =
         await useMultiFileAuthState(
-            folder
+            session.authFolder
         );
+
+    /*
+     * Create socket
+     */
 
     const sock =
         makeWASocket({
-
-            auth: {
-                creds:
-                    state.creds,
-
-                keys:
-                    makeCacheableSignalKeyStore(
-                        state.keys,
-                        logger
-                    )
-            },
+            auth: state,
 
             logger,
 
@@ -1516,6 +2051,9 @@ async function connectSession(
                 Browsers.macOS(
                     "Chrome"
                 ),
+
+            printQRInTerminal:
+                false,
 
             markOnlineOnConnect:
                 false,
@@ -1533,1662 +2071,1297 @@ async function connectSession(
                 60000,
 
             keepAliveIntervalMs:
-                25000
+                30000,
+
+            retryRequestDelayMs:
+                2000
         });
 
-    sessions.set(
-        number,
-        {
-            socket: sock,
-            status:
-                "connecting"
-        }
-    );
+    session.sock =
+        sock;
+
+    /*
+     * Credentials
+     */
 
     sock.ev.on(
         "creds.update",
-        saveCreds
-    );
-
-    setupAntidelete(
-        sock,
-        user
-    );
-
-    sock.ev.on(
-        "group-participants.update",
-        async update => {
-
+        async () => {
             try {
-
-                const settings =
-                    await getSettings(
-                        number
-                    );
-
-                await handleGroupParticipants(
-                    sock,
-                    update,
-                    settings
-                );
-
-            } catch (
-                error
-            ) {
-
-                console.error(
-                    "[GROUP]",
-                    error.message
+                await saveCreds();
+            } catch (error) {
+                addLog(
+                    session.sessionId,
+                    `Credential save failed: ${error.message}`
                 );
             }
         }
     );
 
+    /*
+     * Connection
+     */
+
+    sock.ev.on(
+        "connection.update",
+        async (update) => {
+            try {
+                await handleConnectionUpdate(
+                    session,
+                    update
+                );
+            } catch (error) {
+                addLog(
+                    session.sessionId,
+                    `Connection handler error: ${error.message}`
+                );
+            }
+        }
+    );
+
+    /*
+     * Messages
+     */
+
     sock.ev.on(
         "messages.upsert",
-        async event => {
-
+        async ({
+            messages,
+            type
+        }) => {
             if (
-                event.type !==
-                    "notify" &&
-                event.type !==
-                    "append"
+                type !== "notify" &&
+                type !== "append"
             ) {
                 return;
             }
 
             for (
-                const message
-                of event.messages
+                const message of
+                messages || []
             ) {
-
                 try {
-
-                    await handleMessage(
-                        sock,
-                        message,
-                        user
+                    await processMessage(
+                        session,
+                        message
                     );
-
-                } catch (
-                    error
-                ) {
-
-                    console.error(
-                        "[MESSAGE]",
-                        error
+                } catch (error) {
+                    addLog(
+                        session.sessionId,
+                        `Message handler error: ${error.message}`
                     );
                 }
             }
         }
     );
+
+    /*
+     * Message updates
+     */
 
     sock.ev.on(
-        "connection.update",
-        async update => {
-
-            const {
-                connection,
-                lastDisconnect
-            } = update;
-
+        "messages.update",
+        async (updates) => {
             if (
-                connection ===
-                "connecting"
+                !session.antiDelete
             ) {
-
-                sessions.set(
-                    number,
-                    {
-                        socket: sock,
-                        status:
-                            "connecting"
-                    }
-                );
-
-                await updateUserStatus(
-                    number,
-                    "connecting"
-                );
-
-                await log(
-                    "info",
-                    "WhatsApp connecting...",
-                    number
-                );
+                return;
             }
 
-            if (
-                connection ===
-                "open"
+            for (
+                const item of
+                updates || []
             ) {
-
-                sessions.set(
-                    number,
-                    {
-                        socket: sock,
-                        status:
-                            "connected"
-                    }
-                );
-
-                await updateUserStatus(
-                    number,
-                    "connected"
-                );
-
-                await log(
-                    "success",
-                    "WhatsApp connected. Bot is online.",
-                    number
-                );
-            }
-
-            if (
-                connection ===
-                "close"
-            ) {
-
-                sessions.delete(
-                    number
-                );
-
-                const code =
-                    lastDisconnect
-                        ?.error
-                        ?.output
-                        ?.statusCode;
-
-                await updateUserStatus(
-                    number,
-                    "disconnected"
-                );
-
-                await log(
-                    "warn",
-                    `WhatsApp disconnected. Code: ${code || "unknown"}`,
-                    number
-                );
-
                 if (
-                    code ===
-                    DisconnectReason.loggedOut
+                    item.update
+                        ?.message ===
+                    null
                 ) {
-
-                    await log(
-                        "error",
-                        "WhatsApp session logged out.",
-                        number
+                    addLog(
+                        session.sessionId,
+                        "🗑️ A message was deleted"
                     );
-
-                    return;
                 }
-
-                if (
-                    reconnecting.has(
-                        number
-                    )
-                ) {
-                    return;
-                }
-
-                reconnecting.add(
-                    number
-                );
-
-                await log(
-                    "info",
-                    "Scheduling automatic reconnect...",
-                    number
-                );
-
-                setTimeout(
-                    async () => {
-
-                        reconnecting.delete(
-                            number
-                        );
-
-                        const current =
-                            await findUser(
-                                number
-                            );
-
-                        if (
-                            !current
-                        ) {
-                            return;
-                        }
-
-                        if (
-                            current.status ===
-                            "deleted"
-                        ) {
-                            return;
-                        }
-
-                        if (
-                            current.expiresAt &&
-                            Date.now() >
-                                new Date(
-                                    current.expiresAt
-                                ).getTime()
-                        ) {
-
-                            await updateUserStatus(
-                                number,
-                                "expired"
-                            );
-
-                            return;
-                        }
-
-                        try {
-
-                            await connectSession(
-                                current
-                            );
-
-                        } catch (
-                            error
-                        ) {
-
-                            await log(
-                                "error",
-                                `Reconnect failed: ${error.message}`,
-                                number
-                            );
-                        }
-
-                    },
-                    5000
-                );
             }
         }
     );
 
-    return sock;
-}
+    /*
+     * Group participants
+     */
 
-/* =========================================================
-   USER STATUS
-========================================================= */
+    sock.ev.on(
+        "group-participants.update",
+        async (update) => {
+            try {
+                addLog(
+                    session.sessionId,
+                    `Group event: ${update.action}`
+                );
+            } catch {}
+        }
+    );
 
-async function updateUserStatus(
-    number,
-    status
-) {
-
-    const users =
-        await getUsers();
-
-    const index =
-        users.findIndex(
-            user =>
-                user.number ===
-                number
-        );
+    /*
+     * Pairing code
+     *
+     * Only request it when there
+     * are no registered credentials.
+     */
 
     if (
-        index === -1
+        !state.creds.registered &&
+        session.phone
+    ) {
+        /*
+         * Give the socket time to
+         * initialize before requesting.
+         */
+
+        if (
+            session.pairingTimer
+        ) {
+            clearTimeout(
+                session.pairingTimer
+            );
+        }
+
+        session.pairingTimer =
+            setTimeout(
+                async () => {
+                    try {
+                        await requestPairingCode(
+                            session
+                        );
+                    } catch (error) {
+                        addLog(
+                            session.sessionId,
+                            `Pairing request error: ${error.message}`
+                        );
+                    }
+                },
+                2500
+            );
+    } else {
+        addLog(
+            session.sessionId,
+            "Existing credentials found. Skipping pairing code."
+        );
+    }
+
+    session.status =
+        "connecting";
+
+    await updateSession(
+        session
+    );
+
+    return session;
+}
+
+/*
+============================================================
+ DEPLOY SESSION
+============================================================
+*/
+
+async function deploySession(
+    options = {}
+) {
+    const phone =
+        normalizeNumber(
+            options.phone
+        );
+
+    if (!phone) {
+        throw new Error(
+            "Phone number is required"
+        );
+    }
+
+    if (
+        phone.length < 8 ||
+        phone.length > 15
+    ) {
+        throw new Error(
+            "Invalid phone number"
+        );
+    }
+
+    /*
+     * Prevent duplicate deployment
+     * for the same active number.
+     */
+
+    for (
+        const existing of
+        sessions.values()
+    ) {
+        if (
+            existing.phone === phone &&
+            !existing.stopping
+        ) {
+            return {
+                success: true,
+                existing: true,
+                ...sessionSummary(
+                    existing
+                ),
+                code:
+                    existing.pairingCode ||
+                    null
+            };
+        }
+    }
+
+    const sessionId =
+        options.sessionId ||
+        generateSessionId();
+
+    const session =
+        createSession({
+            sessionId,
+
+            phone,
+
+            days:
+                options.days ||
+                DEFAULT_DAYS,
+
+            mode:
+                options.mode ||
+                MODE,
+
+            pairId:
+                options.pairId ||
+                randomId(12)
+        });
+
+    sessions.set(
+        sessionId,
+        session
+    );
+
+    addLog(
+        sessionId,
+        `🚀 Deployment created for +${phone}`
+    );
+
+    await updateSession(
+        session
+    );
+
+    try {
+        await connectSession(
+            session
+        );
+    } catch (error) {
+        session.status =
+            "error";
+
+        await updateSession(
+            session
+        );
+
+        addLog(
+            sessionId,
+            `❌ Deployment failed: ${error.message}`
+        );
+
+        throw error;
+    }
+
+    /*
+     * Wait briefly so the pairing
+     * code has time to appear.
+     */
+
+    await new Promise(
+        (resolve) =>
+            setTimeout(
+                resolve,
+                3500
+            )
+    );
+
+    return {
+        success: true,
+
+        existing: false,
+
+        sessionId:
+            session.sessionId,
+
+        phone:
+            session.phone,
+
+        pairId:
+            session.pairId,
+
+        code:
+            session.pairingCode ||
+            null,
+
+        status:
+            session.status,
+
+        connected:
+            session.connected,
+
+        expireAt:
+            session.expireAt
+    };
+}
+
+/*
+============================================================
+ STOP SESSION
+============================================================
+*/
+
+async function stopSession(
+    sessionId
+) {
+    const session =
+        sessions.get(
+            sessionId
+        );
+
+    if (!session) {
+        throw new Error(
+            "Session not found"
+        );
+    }
+
+    session.stopping =
+        true;
+
+    session.status =
+        "stopping";
+
+    if (
+        session.reconnectTimer
+    ) {
+        clearTimeout(
+            session.reconnectTimer
+        );
+    }
+
+    if (
+        session.pairingTimer
+    ) {
+        clearTimeout(
+            session.pairingTimer
+        );
+    }
+
+    try {
+        if (
+            session.sock
+        ) {
+            try {
+                session.sock.end(
+                    undefined
+                );
+            } catch {}
+        }
+    } catch {}
+
+    session.sock =
+        null;
+
+    session.connected =
+        false;
+
+    session.status =
+        "stopped";
+
+    await updateSession(
+        session
+    );
+
+    addLog(
+        sessionId,
+        "🛑 Session stopped"
+    );
+
+    return sessionSummary(
+        session
+    );
+}
+
+/*
+============================================================
+ RESTART SESSION
+============================================================
+*/
+
+async function restartSession(
+    sessionId
+) {
+    let session =
+        sessions.get(
+            sessionId
+        );
+
+    if (!session) {
+        const saved =
+            await findDeployment(
+                sessionId
+            );
+
+        if (!saved) {
+            throw new Error(
+                "Session not found"
+            );
+        }
+
+        session =
+            createSession({
+                sessionId:
+                    saved.sessionId,
+
+                phone:
+                    saved.phone,
+
+                days:
+                    saved.days,
+
+                mode:
+                    saved.mode,
+
+                pairId:
+                    saved.pairId
+            });
+
+        sessions.set(
+            sessionId,
+            session
+        );
+    }
+
+    session.stopping =
+        false;
+
+    session.connected =
+        false;
+
+    session.pairingRequested =
+        false;
+
+    session.pairingCode =
+        null;
+
+    session.status =
+        "restarting";
+
+    addLog(
+        sessionId,
+        "♻️ Restarting session..."
+    );
+
+    await updateSession(
+        session
+    );
+
+    await connectSession(
+        session
+    );
+
+    return sessionSummary(
+        session
+    );
+}
+
+/*
+============================================================
+ REMOVE SESSION
+============================================================
+*/
+
+async function removeSession(
+    sessionId
+) {
+    const session =
+        sessions.get(
+            sessionId
+        );
+
+    if (session) {
+        session.stopping =
+            true;
+
+        if (
+            session.reconnectTimer
+        ) {
+            clearTimeout(
+                session.reconnectTimer
+            );
+        }
+
+        if (
+            session.pairingTimer
+        ) {
+            clearTimeout(
+                session.pairingTimer
+            );
+        }
+
+        try {
+            session.sock?.end(
+                undefined
+            );
+        } catch {}
+
+        sessions.delete(
+            sessionId
+        );
+    }
+
+    await removeDeployment(
+        sessionId
+    );
+
+    /*
+     * Delete auth folder
+     */
+
+    try {
+        const authPath =
+            getAuthPath(
+                sessionId
+            );
+
+        if (
+            fs.existsSync(
+                authPath
+            )
+        ) {
+            fs.rmSync(
+                authPath,
+                {
+                    recursive: true,
+                    force: true
+                }
+            );
+        }
+    } catch {}
+
+    addLog(
+        sessionId,
+        "🗑️ Session removed"
+    );
+
+    return {
+        success: true,
+        sessionId
+    };
+}
+
+/*
+============================================================
+ RESTORE SESSIONS
+============================================================
+*/
+
+async function restoreSessions() {
+    let deployments = [];
+
+    /*
+     * Mongo
+     */
+
+    if (mongoReady) {
+        try {
+            deployments =
+                await Deployment
+                    .find({})
+                    .lean();
+        } catch {}
+    }
+
+    /*
+     * Local fallback
+     */
+
+    if (
+        deployments.length === 0
+    ) {
+        const db =
+            readLocalDatabase();
+
+        deployments =
+            Object.values(db);
+    }
+
+    /*
+     * Legacy database
+     */
+
+    if (
+        deployments.length === 0
+    ) {
+        const legacy =
+            readLegacyDatabase();
+
+        for (
+            const [userId, value]
+            of Object.entries(
+                legacy
+            )
+        ) {
+            if (
+                typeof value ===
+                "string"
+            ) {
+                deployments.push({
+                    sessionId:
+                        value,
+                    phone:
+                        userId,
+                    userId
+                });
+            } else if (
+                value &&
+                value.sessionId
+            ) {
+                deployments.push({
+                    ...value,
+                    userId
+                });
+            }
+        }
+    }
+
+    if (
+        deployments.length === 0
+    ) {
+        console.log(
+            "[RESTORE] No saved sessions"
+        );
+
+        return;
+    }
+
+    console.log(
+        `[RESTORE] ${deployments.length} saved sessions found`
+    );
+
+    for (
+        const saved of
+        deployments
+    ) {
+        try {
+            if (
+                !saved.sessionId
+            ) {
+                continue;
+            }
+
+            /*
+             * Do not restore expired
+             * sessions.
+             */
+
+            if (
+                saved.expireAt &&
+                new Date() >
+                    new Date(
+                        saved.expireAt
+                    )
+            ) {
+                addLog(
+                    saved.sessionId,
+                    "Skipping expired session"
+                );
+
+                continue;
+            }
+
+            /*
+             * Phone can sometimes be
+             * missing from older records.
+             */
+
+            const phone =
+                normalizeNumber(
+                    saved.phone ||
+                    saved.userId ||
+                    ""
+                );
+
+            if (!phone) {
+                addLog(
+                    saved.sessionId,
+                    "Skipping session: phone unavailable"
+                );
+
+                continue;
+            }
+
+            const session =
+                createSession({
+                    sessionId:
+                        saved.sessionId,
+
+                    phone,
+
+                    days:
+                        saved.days ||
+                        DEFAULT_DAYS,
+
+                    mode:
+                        saved.mode ||
+                        MODE,
+
+                    pairId:
+                        saved.pairId ||
+                        randomId(12)
+                });
+
+            session.userId =
+                saved.userId ||
+                null;
+
+            session.reconnects =
+                saved.reconnects ||
+                0;
+
+            session.messages =
+                saved.messages ||
+                0;
+
+            session.commandCount =
+                saved.commandCount ||
+                0;
+
+            session.createdAt =
+                saved.createdAt
+                    ? new Date(
+                          saved.createdAt
+                      )
+                    : session.createdAt;
+
+            session.expireAt =
+                saved.expireAt
+                    ? new Date(
+                          saved.expireAt
+                      )
+                    : session.expireAt;
+
+            sessions.set(
+                session.sessionId,
+                session
+            );
+
+            addLog(
+                session.sessionId,
+                "♻️ Restoring saved session..."
+            );
+
+            await connectSession(
+                session
+            );
+
+            /*
+             * Small delay between
+             * multiple connections.
+             */
+
+            await new Promise(
+                (resolve) =>
+                    setTimeout(
+                        resolve,
+                        1000
+                    )
+            );
+        } catch (error) {
+            console.error(
+                `[RESTORE] Failed ${saved.sessionId}:`,
+                error.message
+            );
+        }
+    }
+}
+
+/*
+============================================================
+ EXPIRATION CHECKER
+============================================================
+*/
+
+async function checkExpirations() {
+    const current =
+        Date.now();
+
+    for (
+        const session of
+        sessions.values()
+    ) {
+        if (
+            !session.expireAt
+        ) {
+            continue;
+        }
+
+        if (
+            current >=
+            new Date(
+                session.expireAt
+            ).getTime()
+        ) {
+            addLog(
+                session.sessionId,
+                "⏰ Session expired. Stopping bot."
+            );
+
+            try {
+                await stopSession(
+                    session.sessionId
+                );
+            } catch {}
+        }
+    }
+}
+
+/*
+============================================================
+ MANAGER
+============================================================
+*/
+
+const botManager = {
+    deploy:
+        deploySession,
+
+    deploySession:
+        deploySession,
+
+    getSession:
+        (sessionId) => {
+            const session =
+                sessions.get(
+                    sessionId
+                );
+
+            return session
+                ? sessionSummary(
+                      session
+                  )
+                : null;
+        },
+
+    getSessions:
+        () => {
+            return Array.from(
+                sessions.values()
+            ).map(
+                sessionSummary
+            );
+        },
+
+    getLogs:
+        getLogs,
+
+    stop:
+        stopSession,
+
+    restart:
+        restartSession,
+
+    remove:
+        removeSession,
+
+    stats:
+        () => ({
+            total:
+                sessions.size,
+
+            online:
+                Array.from(
+                    sessions.values()
+                ).filter(
+                    (s) =>
+                        s.connected
+                ).length,
+
+            pairing:
+                Array.from(
+                    sessions.values()
+                ).filter(
+                    (s) =>
+                        s.status ===
+                        "pairing"
+                ).length
+        })
+};
+
+/*
+============================================================
+ GLOBAL MANAGER
+============================================================
+*/
+
+global.ETIAS_BOT_MANAGER =
+    botManager;
+
+/*
+============================================================
+ SERVER
+============================================================
+*/
+
+let serverStarted =
+    false;
+
+async function startServer() {
+    if (
+        serverStarted
     ) {
         return;
     }
 
-    users[index].status =
-        status;
-
-    users[index].updatedAt =
-        new Date().toISOString();
-
-    await saveUsers(
-        users
-    );
-}
-
-/* =========================================================
-   DECODE SESSION CODE
-========================================================= */
-
-function decodeSessionCode(
-    code
-) {
-
-    if (!code) {
-        throw new Error(
-            "Session code is empty"
-        );
-    }
-
-    let raw =
-        String(code).trim();
-
-    /*
-     * Remove optional prefixes.
-     */
-    raw =
-        raw.replace(
-            /^ETIAS-MINI-BOT~/,
-            ""
-        );
-
-    raw =
-        raw.replace(
-            /^SESSION~/,
-            ""
-        );
-
-    /*
-     * Try base64 JSON.
-     */
-    let decoded;
+    serverStarted =
+        true;
 
     try {
-
-        decoded =
-            Buffer.from(
-                raw,
-                "base64"
-            ).toString(
-                "utf8"
-            );
-
-    } catch {
-
-        decoded =
-            raw;
-    }
-
-    try {
-
-        return JSON.parse(
-            decoded
-        );
-
-    } catch {
-
-        /*
-         * Also allow raw JSON.
-         */
-        try {
-
-            return JSON.parse(
-                raw
-            );
-
-        } catch {
-
-            throw new Error(
-                "Invalid session code. Expected the code generated by the ETIAS pairing server."
-            );
-        }
-    }
-}
-
-/* =========================================================
-   WRITE SESSION BUNDLE
-========================================================= */
-
-async function writeSessionBundle(
-    code,
-    destination
-) {
-
-    const bundle =
-        decodeSessionCode(
-            code
-        );
-
-    await fsp.mkdir(
-        destination,
-        {
-            recursive: true
-        }
-    );
-
-    /*
-     * Format used by the pairing server:
-     *
-     * {
-     *   format: "ETIAS-MINI-BOT",
-     *   version: 2,
-     *   files: {
-     *      "creds.json": "base64...",
-     *      "keys/....json": "base64..."
-     *   }
-     * }
-     */
-
-    const files =
-        bundle.files ||
-        bundle.auth ||
-        bundle.data;
-
-    if (
-        !files ||
-        typeof files !==
-            "object"
-    ) {
-
-        throw new Error(
-            "Session bundle contains no auth files"
-        );
-    }
-
-    for (
-        const [
-            relative,
-            value
-        ] of Object.entries(
-            files
-        )
-    ) {
-
-        /*
-         * Prevent path traversal.
-         */
-        const safeRelative =
-            path.normalize(
-                relative
-            );
+        const serverModule =
+            require("./server.js");
 
         if (
-            safeRelative.startsWith(
-                ".."
-            ) ||
-            path.isAbsolute(
-                safeRelative
-            )
+            serverModule &&
+            typeof serverModule.startServer ===
+                "function"
         ) {
-            continue;
-        }
+            await serverModule.startServer();
 
-        const target =
-            path.join(
-                destination,
-                safeRelative
-            );
-
-        await fsp.mkdir(
-            path.dirname(
-                target
-            ),
-            {
-                recursive: true
-            }
-        );
-
-        let buffer;
-
-        if (
-            typeof value ===
-            "string"
-        ) {
-
-            buffer =
-                Buffer.from(
-                    value,
-                    "base64"
-                );
-
-        } else if (
-            Array.isArray(
-                value
-            )
-        ) {
-
-            buffer =
-                Buffer.from(
-                    value
-                );
-
-        } else if (
-            value?.base64
-        ) {
-
-            buffer =
-                Buffer.from(
-                    value.base64,
-                    "base64"
-                );
-
-        } else {
-
-            buffer =
-                Buffer.from(
-                    JSON.stringify(
-                        value,
-                        null,
-                        2
-                    )
-                );
-        }
-
-        await fsp.writeFile(
-            target,
-            buffer
-        );
-    }
-
-    const creds =
-        path.join(
-            destination,
-            "creds.json"
-        );
-
-    if (
-        !fs.existsSync(
-            creds
-        )
-    ) {
-
-        throw new Error(
-            "Session bundle was extracted but creds.json is missing"
-        );
-    }
-
-    return bundle;
-}
-
-/* =========================================================
-   DEPLOY USER
-========================================================= */
-
-async function deployUser({
-    number,
-    duration,
-    code
-}) {
-
-    number =
-        cleanNumber(
-            number
-        );
-
-    duration =
-        Number(
-            duration
-        );
-
-    if (
-        !number
-    ) {
-        throw new Error(
-            "User number is required"
-        );
-    }
-
-    if (
-        !Number.isInteger(
-            duration
-        ) ||
-        duration < 1
-    ) {
-
-        throw new Error(
-            "Duration must be at least 1 day"
-        );
-    }
-
-    if (
-        !code
-    ) {
-
-        throw new Error(
-            "Session code is required"
-        );
-    }
-
-    const users =
-        await getUsers();
-
-    const existingIndex =
-        users.findIndex(
-            user =>
-                user.number ===
-                number
-        );
-
-    /*
-     * Remove existing socket if replacing
-     * an existing deployment.
-     */
-    if (
-        sessions.has(
-            number
-        )
-    ) {
-
-        try {
-
-            const old =
-                sessions.get(
-                    number
-                );
-
-            old.socket?.end();
-
-        } catch {}
-
-        sessions.delete(
-            number
-        );
-    }
-
-    const folder =
-        authPath(
-            number
-        );
-
-    /*
-     * Clean previous auth state.
-     */
-    await fsp.rm(
-        folder,
-        {
-            recursive: true,
-            force: true
-        }
-    );
-
-    await fsp.mkdir(
-        folder,
-        {
-            recursive: true
-        }
-    );
-
-    await log(
-        "info",
-        "Extracting session bundle...",
-        number
-    );
-
-    await writeSessionBundle(
-        code,
-        folder
-    );
-
-    const now =
-        new Date();
-
-    const expires =
-        new Date(
-            now.getTime() +
-            duration *
-                24 *
-                60 *
-                60 *
-                1000
-        );
-
-    const user = {
-
-        number,
-
-        duration,
-
-        status:
-            "deploying",
-
-        connected:
-            false,
-
-        authFolder:
-            folder,
-
-        createdAt:
-            existingIndex >= 0
-                ? users[
-                    existingIndex
-                  ].createdAt
-                : now.toISOString(),
-
-        updatedAt:
-            now.toISOString(),
-
-        expiresAt:
-            expires.toISOString()
-    };
-
-    if (
-        existingIndex >= 0
-    ) {
-
-        users[
-            existingIndex
-        ] = {
-            ...users[
-                existingIndex
-            ],
-            ...user
-        };
-
-    } else {
-
-        users.push(
-            user
-        );
-    }
-
-    await saveUsers(
-        users
-    );
-
-    await saveSettings(
-        number,
-        await getSettings(
-            number
-        )
-    );
-
-    await log(
-        "info",
-        "Session extracted successfully.",
-        number
-    );
-
-    /*
-     * Connect immediately.
-     */
-    await connectSession(
-        user
-    );
-
-    return user;
-}
-
-/* =========================================================
-   RENEW USER
-========================================================= */
-
-async function renewUser(
-    number,
-    duration
-) {
-
-    number =
-        cleanNumber(
-            number
-        );
-
-    duration =
-        Number(
-            duration
-        );
-
-    if (
-        !number
-    ) {
-        throw new Error(
-            "Number required"
-        );
-    }
-
-    if (
-        !Number.isInteger(
-            duration
-        ) ||
-        duration < 1
-    ) {
-        throw new Error(
-            "Invalid duration"
-        );
-    }
-
-    const users =
-        await getUsers();
-
-    const index =
-        users.findIndex(
-            user =>
-                user.number ===
-                number
-        );
-
-    if (
-        index === -1
-    ) {
-        throw new Error(
-            "User not found"
-        );
-    }
-
-    const current =
-        new Date();
-
-    const oldExpiry =
-        new Date(
-            users[index]
-                .expiresAt
-        );
-
-    const base =
-        oldExpiry > current
-            ? oldExpiry
-            : current;
-
-    const newExpiry =
-        new Date(
-            base.getTime() +
-            duration *
-                24 *
-                60 *
-                60 *
-                1000
-        );
-
-    users[index]
-        .expiresAt =
-        newExpiry.toISOString();
-
-    users[index]
-        .duration =
-        duration;
-
-    users[index]
-        .status =
-        "connected";
-
-    await saveUsers(
-        users
-    );
-
-    await log(
-        "success",
-        `User renewed for ${duration} day(s).`,
-        number
-    );
-
-    return users[index];
-}
-
-/* =========================================================
-   DELETE USER
-========================================================= */
-
-async function deleteUser(
-    number
-) {
-
-    number =
-        cleanNumber(
-            number
-        );
-
-    const users =
-        await getUsers();
-
-    const index =
-        users.findIndex(
-            user =>
-                user.number ===
-                number
-        );
-
-    if (
-        index === -1
-    ) {
-
-        throw new Error(
-            "User not found"
-        );
-    }
-
-    /*
-     * Stop WhatsApp socket.
-     */
-    if (
-        sessions.has(
-            number
-        )
-    ) {
-
-        try {
-
-            const session =
-                sessions.get(
-                    number
-                );
-
-            session.socket?.end();
-
-        } catch {}
-
-        sessions.delete(
-            number
-        );
-    }
-
-    /*
-     * Remove auth files.
-     */
-    const folder =
-        authPath(
-            number
-        );
-
-    await fsp.rm(
-        folder,
-        {
-            recursive: true,
-            force: true
-        }
-    );
-
-    /*
-     * Remove settings.
-     */
-    const settings =
-        await readJSON(
-            SETTINGS_FILE,
-            {}
-        );
-
-    delete settings[
-        number
-    ];
-
-    await writeJSON(
-        SETTINGS_FILE,
-        settings
-    );
-
-    /*
-     * Remove user.
-     */
-    users.splice(
-        index,
-        1
-    );
-
-    await saveUsers(
-        users
-    );
-
-    await log(
-        "success",
-        "User deleted.",
-        number
-    );
-
-    return true;
-}
-
-/* =========================================================
-   EXPIRY CHECKER
-========================================================= */
-
-async function checkExpiry() {
-
-    const users =
-        await getUsers();
-
-    const now =
-        Date.now();
-
-    for (
-        const user
-        of users
-    ) {
-
-        if (
-            !user.expiresAt
-        ) {
-            continue;
+            return;
         }
 
         if (
-            new Date(
-                user.expiresAt
-            ).getTime() <=
-            now
+            serverModule &&
+            typeof serverModule.listen ===
+                "function"
         ) {
+            await new Promise(
+                (resolve) => {
+                    serverModule.listen(
+                        PORT,
+                        () => {
+                            console.log(
+                                `[SERVER] Running on port ${PORT}`
+                            );
 
-            if (
-                user.status !==
-                    "expired"
-            ) {
-
-                await log(
-                    "warn",
-                    "Deployment expired.",
-                    user.number
-                );
-
-                await updateUserStatus(
-                    user.number,
-                    "expired"
-                );
-
-                /*
-                 * Disconnect expired session.
-                 */
-                if (
-                    sessions.has(
-                        user.number
-                    )
-                ) {
-
-                    try {
-
-                        sessions
-                            .get(
-                                user.number
-                            )
-                            .socket
-                            ?.end();
-
-                    } catch {}
-
-                    sessions.delete(
-                        user.number
+                            resolve();
+                        }
                     );
                 }
-            }
+            );
+
+            return;
         }
-    }
-}
-
-/* =========================================================
-   EXPRESS
-========================================================= */
-
-app.use(
-    express.json({
-        limit:
-            "20mb"
-    })
-);
-
-app.use(
-    express.urlencoded({
-        extended: true,
-        limit:
-            "20mb"
-    })
-);
-
-app.use(
-    express.static(
-        PUBLIC_DIR
-    )
-);
-
-/* =========================================================
-   DASHBOARD
-========================================================= */
-
-app.get(
-    "/",
-    (req, res) => {
-
-        res.sendFile(
-            path.join(
-                PUBLIC_DIR,
-                "deploy.html"
-            )
-        );
-    }
-);
-
-/* =========================================================
-   HEALTH
-========================================================= */
-
-app.get(
-    "/health",
-    (req, res) => {
-
-        res.json({
-            success:
-                true,
-
-            service:
-                "ETIAS-MINI-BOT",
-
-            sessions:
-                sessions.size,
-
-            uptime:
-                process.uptime(),
-
-            time:
-                new Date().toISOString()
-        });
-    }
-);
-
-/* =========================================================
-   USERS API
-========================================================= */
-
-app.get(
-    "/api/users",
-    requireAdmin,
-    async (req, res) => {
-
-        try {
-
-            const users =
-                await getUsers();
-
-            const safe =
-                users.map(
-                    user => ({
-                        ...user,
-
-                        /*
-                         * Never return auth path
-                         * to browser.
-                         */
-                        authFolder:
-                            undefined,
-
-                        connected:
-                            sessions.has(
-                                user.number
-                            )
-                    })
-                );
-
-            res.json({
-                success:
-                    true,
-
-                users:
-                    safe
-            });
-
-        } catch (
-            error
-        ) {
-
-            res.status(
-                500
-            ).json({
-                success:
-                    false,
-
-                error:
-                    error.message
-            });
-        }
-    }
-);
-
-/* =========================================================
-   LOGS API
-========================================================= */
-
-app.get(
-    "/api/logs",
-    requireAdmin,
-    async (req, res) => {
-
-        const logs =
-            await readJSON(
-                LOG_FILE,
-                []
-            );
-
-        res.json({
-            success:
-                true,
-
-            logs:
-                logs.slice(
-                    -150
-                )
-        });
-    }
-);
-
-/* =========================================================
-   DEPLOY API
-========================================================= */
-
-app.post(
-    "/api/deploy",
-    requireAdmin,
-    async (req, res) => {
-
-        try {
-
-            const {
-                number,
-                duration,
-                code
-            } = req.body;
-
-            const user =
-                await deployUser({
-                    number,
-                    duration,
-                    code
-                });
-
-            res.json({
-                success:
-                    true,
-
-                message:
-                    "User deployed and WhatsApp connection started.",
-
-                user
-            });
-
-        } catch (
-            error
-        ) {
-
-            await log(
-                "error",
-                error.message,
-                cleanNumber(
-                    req.body?.number
-                )
-            );
-
-            res.status(
-                400
-            ).json({
-                success:
-                    false,
-
-                error:
-                    error.message
-            });
-        }
-    }
-);
-
-/* =========================================================
-   RENEW API
-========================================================= */
-
-app.post(
-    "/api/renew",
-    requireAdmin,
-    async (req, res) => {
-
-        try {
-
-            const {
-                number,
-                duration
-            } = req.body;
-
-            const user =
-                await renewUser(
-                    number,
-                    duration
-                );
-
-            res.json({
-                success:
-                    true,
-
-                user
-            });
-
-        } catch (
-            error
-        ) {
-
-            res.status(
-                400
-            ).json({
-                success:
-                    false,
-
-                error:
-                    error.message
-            });
-        }
-    }
-);
-
-/* =========================================================
-   DELETE API
-========================================================= */
-
-app.delete(
-    "/api/users/:number",
-    requireAdmin,
-    async (req, res) => {
-
-        try {
-
-            await deleteUser(
-                req.params.number
-            );
-
-            res.json({
-                success:
-                    true,
-
-                message:
-                    "User deleted."
-            });
-
-        } catch (
-            error
-        ) {
-
-            res.status(
-                400
-            ).json({
-                success:
-                    false,
-
-                error:
-                    error.message
-            });
-        }
-    }
-);
-
-/* =========================================================
-   SETTINGS API
-========================================================= */
-
-app.get(
-    "/api/settings/:number",
-    requireAdmin,
-    async (req, res) => {
-
-        const number =
-            cleanNumber(
-                req.params.number
-            );
-
-        res.json({
-            success:
-                true,
-
-            settings:
-                await getSettings(
-                    number
-                )
-        });
-    }
-);
-
-app.post(
-    "/api/settings/:number",
-    requireAdmin,
-    async (req, res) => {
-
-        try {
-
-            const number =
-                cleanNumber(
-                    req.params.number
-                );
-
-            const current =
-                await getSettings(
-                    number
-                );
-
-            await saveSettings(
-                number,
-                {
-                    ...current,
-                    ...req.body
-                }
-            );
-
-            res.json({
-                success:
-                    true,
-
-                settings:
-                    await getSettings(
-                        number
-                    )
-            });
-
-        } catch (
-            error
-        ) {
-
-            res.status(
-                400
-            ).json({
-                success:
-                    false,
-
-                error:
-                    error.message
-            });
-        }
-    }
-);
-
-/* =========================================================
-   COMMAND RELOAD
-========================================================= */
-
-app.post(
-    "/api/reload-commands",
-    requireAdmin,
-    async (req, res) => {
-
-        await loadCommands();
-
-        res.json({
-            success:
-                true,
-
-            commands:
-                commands.size
-        });
-    }
-);
-
-/* =========================================================
-   404
-========================================================= */
-
-app.use(
-    (req, res) => {
-
-        res.status(
-            404
-        ).json({
-            success:
-                false,
-
-            error:
-                "Route not found"
-        });
-    }
-);
-
-/* =========================================================
-   START
-========================================================= */
-
-async function start() {
-
-    await ensureDirectories();
-
-    await loadCommands();
-
-    /*
-     * Reconnect every saved deployment.
-     */
-    const users =
-        await getUsers();
-
-    console.log(
-        `[BOOT] ${users.length} saved users`
-    );
-
-    for (
-        const user
-        of users
-    ) {
-
-        if (
-            user.expiresAt &&
-            Date.now() >
-                new Date(
-                    user.expiresAt
-                ).getTime()
-        ) {
-
-            await updateUserStatus(
-                user.number,
-                "expired"
-            );
-
-            continue;
-        }
-
-        try {
-
-            await connectSession(
-                user
-            );
-
-        } catch (
-            error
-        ) {
-
-            await log(
-                "error",
-                `Startup connection failed: ${error.message}`,
-                user.number
-            );
-        }
-
-        /*
-         * Small delay between sessions.
-         */
-        await new Promise(
-            resolve =>
-                setTimeout(
-                    resolve,
-                    1500
-                )
-        );
-    }
-
-    app.listen(
-        PORT,
-        "0.0.0.0",
-        () => {
-
-            console.log(
-                "========================================"
-            );
-
-            console.log(
-                "🤖 ETIAS-MINI-BOT"
-            );
-
-            console.log(
-                "🚀 MULTI-SESSION SERVER ONLINE"
-            );
-
-            console.log(
-                `🌐 Port: ${PORT}`
-            );
-
-            console.log(
-                `📦 Commands: ${commands.size}`
-            );
-
-            console.log(
-                `👥 Sessions: ${sessions.size}`
-            );
-
-            console.log(
-                "========================================"
-            );
-        }
-    );
-}
-
-/* =========================================================
-   PERIODIC EXPIRY
-========================================================= */
-
-setInterval(
-    () => {
-
-        checkExpiry()
-            .catch(
-                console.error
-            );
-
-    },
-    60 * 1000
-);
-
-/* =========================================================
-   START
-========================================================= */
-
-start().catch(
-    error => {
-
-        console.error(
-            "[FATAL]",
-            error
-        );
-
-        process.exit(
-            1
-        );
-    }
-);
-
-/* =========================================================
-   SHUTDOWN
-========================================================= */
-
-async function shutdown() {
-
-    console.log(
-        "[SHUTDOWN] Closing sessions..."
-    );
-
-    for (
-        const [
-            number,
-            session
-        ]
-        of sessions.entries()
-    ) {
-
-        try {
-
-            session.socket?.end();
-
-        } catch {}
 
         console.log(
-            `[SHUTDOWN] ${number}`
+            "[SERVER] server.js loaded"
         );
+    } catch (error) {
+        serverStarted =
+            false;
+
+        console.error(
+            "[SERVER] Failed:",
+            error.message
+        );
+
+        throw error;
+    }
+}
+
+/*
+============================================================
+ HEARTBEAT
+============================================================
+*/
+
+function startHeartbeat() {
+    setInterval(
+        async () => {
+            for (
+                const session of
+                sessions.values()
+            ) {
+                if (
+                    session.connected
+                ) {
+                    session.lastSeen =
+                        now();
+
+                    try {
+                        await updateSession(
+                            session
+                        );
+                    } catch {}
+                }
+            }
+        },
+        60000
+    );
+}
+
+/*
+============================================================
+ STARTUP
+============================================================
+*/
+
+async function start() {
+    console.log("");
+    console.log(
+        "=============================================="
+    );
+    console.log(
+        `       ${BOT_NAME}`
+    );
+    console.log(
+        "       MULTI SESSION ENGINE"
+    );
+    console.log(
+        "=============================================="
+    );
+    console.log(
+        `Node: ${process.version}`
+    );
+    console.log(
+        `Platform: ${process.platform}`
+    );
+    console.log(
+        `Port: ${PORT}`
+    );
+    console.log(
+        `Prefix: ${PREFIX}`
+    );
+    console.log(
+        "=============================================="
+    );
+    console.log("");
+
+    /*
+     * Mongo
+     */
+
+    await connectMongo();
+
+    /*
+     * Commands
+     */
+
+    loadCommands();
+
+    /*
+     * Server
+     */
+
+    await startServer();
+
+    /*
+     * Restore
+     */
+
+    await restoreSessions();
+
+    /*
+     * Expiration checker
+     */
+
+    setInterval(
+        () => {
+            checkExpirations()
+                .catch(() => {});
+        },
+        60000
+    );
+
+    /*
+     * Heartbeat
+     */
+
+    startHeartbeat();
+
+    console.log("");
+    console.log(
+        `[BOT] ${BOT_NAME} is ready`
+    );
+
+    console.log(
+        `[BOT] Active sessions: ${sessions.size}`
+    );
+
+    console.log("");
+}
+
+/*
+============================================================
+ GRACEFUL SHUTDOWN
+============================================================
+*/
+
+let shuttingDown =
+    false;
+
+async function shutdown(
+    signal
+) {
+    if (
+        shuttingDown
+    ) {
+        return;
     }
 
-    sessions.clear();
+    shuttingDown =
+        true;
 
-    process.exit(
-        0
+    console.log(
+        `\n[SHUTDOWN] ${signal}`
     );
+
+    for (
+        const session of
+        sessions.values()
+    ) {
+        try {
+            session.stopping =
+                true;
+
+            if (
+                session.reconnectTimer
+            ) {
+                clearTimeout(
+                    session.reconnectTimer
+                );
+            }
+
+            if (
+                session.pairingTimer
+            ) {
+                clearTimeout(
+                    session.pairingTimer
+                );
+            }
+
+            if (
+                session.sock
+            ) {
+                session.sock.end(
+                    undefined
+                );
+            }
+        } catch {}
+    }
+
+    try {
+        if (
+            mongoose.connection
+                .readyState === 1
+        ) {
+            await mongoose.connection.close();
+        }
+    } catch {}
+
+    process.exit(0);
 }
 
 process.on(
     "SIGINT",
-    shutdown
+    () =>
+        shutdown("SIGINT")
 );
 
 process.on(
     "SIGTERM",
-    shutdown
+    () =>
+        shutdown("SIGTERM")
 );
+
+/*
+============================================================
+ PROCESS ERRORS
+============================================================
+*/
+
+process.on(
+    "uncaughtException",
+    (error) => {
+        console.error(
+            "[FATAL]",
+            error
+        );
+    }
+);
+
+process.on(
+    "unhandledRejection",
+    (error) => {
+        console.error(
+            "[PROMISE]",
+            error
+        );
+    }
+);
+
+/*
+============================================================
+ EXPORTS
+============================================================
+*/
+
+module.exports = {
+    botManager,
+
+    Deployment,
+
+    sessions,
+
+    connectMongo,
+
+    connectSession,
+
+    deploySession,
+
+    stopSession,
+
+    restartSession,
+
+    removeSession,
+
+    getAllDeployments,
+
+    findDeployment,
+
+    getLogs,
+
+    addLog,
+
+    generateSessionId
+};
+
+/*
+============================================================
+ RUN
+============================================================
+*/
+
+if (
+    require.main ===
+    module
+) {
+    start().catch(
+        (error) => {
+            console.error(
+                "[STARTUP ERROR]",
+                error
+            );
+
+            process.exit(1);
+        }
+    );
+}
