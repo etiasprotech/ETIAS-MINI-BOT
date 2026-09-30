@@ -1,596 +1,420 @@
-// ============================================================
-// ETIAS-MINI-BOT
-// MULTI SESSION WHATSAPP BOT SERVER
-// ============================================================
-// Features:
-// - Multi-device Baileys
-// - Multi-session support
-// - Pairing-code login
-// - Long/short session ID support
-// - SESSION_ID saved as creds.json
-// - SESSION_ID sent to WhatsApp as a FILE
-// - SESSION_ID also printed in terminal
-// - MongoDB session persistence
-// - Automatic reconnect
-// - Anti-delete
-// - Anti-link
-// - Anti-view-once
-// - View-once recovery
-// - Public/private mode
-// - Owner commands
-// - Command loader
-// - Live connection logs
-// - Session expiration support
-// ============================================================
+"use strict";
 
 require("dotenv").config();
 
-const fs = require("fs");
-const path = require("path");
-const http = require("http");
 const express = require("express");
-const cors = require("cors");
-const mongoose = require("mongoose");
+const fs = require("fs");
+const fsp = fs.promises;
+const path = require("path");
+const pino = require("pino");
 
 const {
     default: makeWASocket,
     useMultiFileAuthState,
     DisconnectReason,
-    fetchLatestBaileysVersion,
-    makeCacheableSignalKeyStore,
     Browsers,
-    jidNormalizedUser,
-    downloadContentFromMessage,
-    getContentType
+    makeCacheableSignalKeyStore,
+    downloadMediaMessage
 } = require("@whiskeysockets/baileys");
-
-const pino = require("pino");
-
-// ============================================================
-// CONFIG
-// ============================================================
-
-const BOT_NAME = process.env.BOT_NAME || "ETIAS-MINI-BOT";
-const PREFIX = process.env.PREFIX || ".";
-const PORT = Number(process.env.PORT || 3000);
-
-const OWNER_NUMBER =
-    process.env.OWNER_NUMBER ||
-    process.env.OWNER ||
-    "";
-
-const MONGO_URI =
-    process.env.MONGO_URI ||
-    process.env.MONGODB_URI ||
-    "";
-
-const SESSION_EXPIRY_DAYS =
-    Number(process.env.SESSION_EXPIRY_DAYS || 30);
-
-const PAIRING_SITE =
-    process.env.PAIRING_SITE ||
-    "https://etias-mini-bot-pair.onrender.com/";
-
-const DATA_DIR = path.join(__dirname, "data");
-const AUTH_DIR = path.join(__dirname, "auth");
-const USERS_DIR = path.join(AUTH_DIR, "users");
-const COMMANDS_DIR = path.join(__dirname, "commands");
-const MEDIA_DIR = path.join(__dirname, "media");
-
-const BOT_IMAGE =
-    process.env.BOT_IMAGE ||
-    path.join(__dirname, "assets", "bot_image.png");
-
-// ============================================================
-// DIRECTORIES
-// ============================================================
-
-for (const dir of [
-    DATA_DIR,
-    AUTH_DIR,
-    USERS_DIR,
-    COMMANDS_DIR,
-    MEDIA_DIR
-]) {
-    if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-    }
-}
-
-// ============================================================
-// GLOBAL STATE
-// ============================================================
-
-const sessions = new Map();
-const commands = new Map();
-
-let BOT_MODE = "public";
-
-// ============================================================
-// EXPRESS
-// ============================================================
 
 const app = express();
 
-app.use(cors());
-app.use(express.json({ limit: "50mb" }));
-app.use(express.urlencoded({
-    extended: true,
-    limit: "50mb"
-}));
+const PORT = process.env.PORT || 3000;
 
-app.get("/", (req, res) => {
-    res.send(`
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${BOT_NAME}</title>
-<style>
-body{
-    margin:0;
-    background:#050505;
-    color:#00ffcc;
-    font-family:Arial,sans-serif;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    min-height:100vh;
-}
-.box{
-    text-align:center;
-    padding:40px;
-    border:1px solid #00ffcc;
-    border-radius:20px;
-    box-shadow:0 0 30px #00ffcc44;
-}
-h1{
-    font-size:32px;
-}
-p{
-    color:#aaa;
-}
-</style>
-</head>
-<body>
-<div class="box">
-<h1>${BOT_NAME}</h1>
-<p>Multi-session WhatsApp Bot Server</p>
-<p>Status: ONLINE</p>
-<p>Sessions: ${sessions.size}</p>
-</div>
-</body>
-</html>
-`);
+const ROOT = __dirname;
+
+const AUTH_DIR = path.join(ROOT, "auth");
+const DATA_DIR = path.join(ROOT, "data");
+const COMMANDS_DIR = path.join(ROOT, "commands");
+const PUBLIC_DIR = path.join(ROOT, "public");
+
+const USERS_FILE = path.join(
+    DATA_DIR,
+    "deployed.json"
+);
+
+const SETTINGS_FILE = path.join(
+    DATA_DIR,
+    "settings.json"
+);
+
+const LOG_FILE = path.join(
+    DATA_DIR,
+    "logs.json"
+);
+
+const ADMIN_TOKEN =
+    process.env.ADMIN_TOKEN ||
+    "change-this-admin-token";
+
+const logger = pino({
+    level: "silent"
 });
 
-// ============================================================
-// HEALTH
-// ============================================================
+/* =========================================================
+   MEMORY
+========================================================= */
 
-app.get("/health", (req, res) => {
-    res.json({
-        status: "online",
-        bot: BOT_NAME,
-        mode: BOT_MODE,
-        sessions: sessions.size,
-        commands: commands.size,
-        uptime: process.uptime()
-    });
-});
+const sessions = new Map();
 
-app.get("/status", (req, res) => {
+const reconnecting = new Set();
 
-    const result = [];
+let commands = new Map();
 
-    for (const [id, session] of sessions.entries()) {
+/* =========================================================
+   DIRECTORIES
+========================================================= */
 
-        result.push({
-            sessionId: id,
-            phone: session.phone || null,
-            connected: !!session.connected,
-            reconnecting: !!session.reconnecting,
-            createdAt: session.createdAt || null,
-            expireAt: session.expireAt || null
-        });
-    }
+async function ensureDirectories() {
 
-    res.json({
-        bot: BOT_NAME,
-        mode: BOT_MODE,
-        sessions: result
-    });
-});
-
-// ============================================================
-// MONGOOSE MODEL
-// ============================================================
-
-let SessionModel = null;
-
-if (MONGO_URI) {
-
-    const sessionSchema = new mongoose.Schema({
-
-        userId: {
-            type: String,
-            index: true
-        },
-
-        sessionId: {
-            type: String,
-            unique: true,
-            index: true
-        },
-
-        phone: {
-            type: String,
-            index: true
-        },
-
-        connected: {
-            type: Boolean,
-            default: false
-        },
-
-        days: {
-            type: Number,
-            default: SESSION_EXPIRY_DAYS
-        },
-
-        createdAt: {
-            type: Date,
-            default: Date.now
-        },
-
-        expireAt: {
-            type: Date
+    await fsp.mkdir(
+        AUTH_DIR,
+        {
+            recursive: true
         }
+    );
 
-    });
+    await fsp.mkdir(
+        DATA_DIR,
+        {
+            recursive: true
+        }
+    );
 
-    SessionModel =
-        mongoose.models.BotSession ||
-        mongoose.model("BotSession", sessionSchema);
-}
+    await fsp.mkdir(
+        COMMANDS_DIR,
+        {
+            recursive: true
+        }
+    );
 
-// ============================================================
-// MONGODB
-// ============================================================
+    await fsp.mkdir(
+        PUBLIC_DIR,
+        {
+            recursive: true
+        }
+    );
 
-async function connectMongo() {
-
-    if (!MONGO_URI) {
-        console.log("[MONGO] ⚠️ MONGO_URI not configured");
-        return;
+    if (!fs.existsSync(USERS_FILE)) {
+        await fsp.writeFile(
+            USERS_FILE,
+            "[]"
+        );
     }
 
-    try {
+    if (!fs.existsSync(SETTINGS_FILE)) {
+        await fsp.writeFile(
+            SETTINGS_FILE,
+            "{}"
+        );
+    }
 
-        await mongoose.connect(MONGO_URI);
-
-        console.log("[MONGO] ✅ Connected");
-
-    } catch (err) {
-
-        console.error(
-            "[MONGO] ❌ Connection failed:",
-            err.message
+    if (!fs.existsSync(LOG_FILE)) {
+        await fsp.writeFile(
+            LOG_FILE,
+            "[]"
         );
     }
 }
 
-// ============================================================
-// HELPERS
-// ============================================================
+/* =========================================================
+   JSON STORAGE
+========================================================= */
 
-function cleanPhone(phone) {
+async function readJSON(file, fallback) {
 
-    return String(phone || "")
-        .replace(/\D/g, "")
-        .replace(/^0+/, "");
-}
+    try {
 
-function normalizeJid(phone) {
+        const data =
+            await fsp.readFile(
+                file,
+                "utf8"
+            );
 
-    const clean = cleanPhone(phone);
+        return JSON.parse(data);
 
-    if (!clean) return null;
+    } catch {
 
-    return jidNormalizedUser(`${clean}@s.whatsapp.net`);
-}
-
-function safeSessionName(value) {
-
-    return String(value || "")
-        .replace(/[^a-zA-Z0-9_-]/g, "_")
-        .slice(0, 100);
-}
-
-function sessionFolder(sessionId) {
-
-    return path.join(
-        USERS_DIR,
-        safeSessionName(sessionId)
-    );
-}
-
-function sleep(ms) {
-
-    return new Promise(resolve =>
-        setTimeout(resolve, ms)
-    );
-}
-
-function generateSessionId() {
-
-    const chars =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-
-    let random = "";
-
-    for (let i = 0; i < 160; i++) {
-        random += chars[
-            Math.floor(Math.random() * chars.length)
-        ];
+        return fallback;
     }
-
-    return `ETIAS-MINI-BOT~${random}`;
 }
 
-// ============================================================
-// SESSION FILE
-// ============================================================
+async function writeJSON(
+    file,
+    data
+) {
 
-function saveSessionIdFile(sessionId, folder) {
+    await fsp.writeFile(
+        file,
+        JSON.stringify(
+            data,
+            null,
+            2
+        )
+    );
+}
 
-    fs.mkdirSync(folder, {
-        recursive: true
-    });
+/* =========================================================
+   LOGGING
+========================================================= */
 
-    const credsPath =
-        path.join(folder, "creds.json");
+async function log(
+    level,
+    message,
+    number = null
+) {
 
-    const sessionData = {
-
-        format: "ETIAS-MINI-BOT",
-
-        version: 2,
-
-        sessionId,
-
-        generatedAt:
+    const entry = {
+        time:
             new Date().toISOString(),
 
-        bot: BOT_NAME
+        level,
 
+        number,
+
+        message
     };
 
-    fs.writeFileSync(
-        credsPath,
-        JSON.stringify(sessionData, null, 2)
+    console.log(
+        `[${level.toUpperCase()}]`,
+        number
+            ? `[${number}]`
+            : "",
+        message
     );
 
-    return credsPath;
-}
-
-// ============================================================
-// SESSION ID FILE FOR SENDING
-// ============================================================
-
-function createSessionDownload(sessionId) {
-
-    const fileName =
-        `${safeSessionName(sessionId)}.txt`;
-
-    const filePath =
-        path.join(MEDIA_DIR, fileName);
-
-    fs.writeFileSync(
-        filePath,
-        sessionId,
-        "utf8"
-    );
-
-    return filePath;
-}
-
-// ============================================================
-// SEND SESSION FILE
-// ============================================================
-
-async function sendSessionFile(sock, phone, sessionId) {
-
-    const jid = normalizeJid(phone);
-
-    if (!jid) {
-        console.log("[SESSION] Invalid phone:", phone);
-        return false;
-    }
-
-    const filePath =
-        createSessionDownload(sessionId);
-
-    try {
-
-        console.log(
-            `[SESSION] Sending session file to ${phone}`
+    const logs =
+        await readJSON(
+            LOG_FILE,
+            []
         );
 
-        await sock.sendMessage(jid, {
+    logs.push(entry);
 
-            document: {
-                url: filePath
-            },
+    /*
+     * Keep last 500 logs.
+     */
+    const trimmed =
+        logs.slice(-500);
 
-            mimetype:
-                "text/plain",
-
-            fileName:
-                `${BOT_NAME}-SESSION.txt`,
-
-            caption:
-                `*${BOT_NAME} SESSION*\n\n` +
-                `Your complete session ID is attached as a file.\n\n` +
-                `Keep this file private.\n\n` +
-                `Powered by ETIAS-TECH`
-
-        });
-
-        console.log(
-            `[SESSION] ✅ Session file sent to ${phone}`
-        );
-
-        return true;
-
-    } catch (err) {
-
-        console.error(
-            "[SESSION] ❌ Failed to send:",
-            err.message
-        );
-
-        return false;
-
-    } finally {
-
-        setTimeout(() => {
-
-            try {
-
-                if (fs.existsSync(filePath)) {
-                    fs.unlinkSync(filePath);
-                }
-
-            } catch (_) {}
-
-        }, 60000);
-    }
+    await writeJSON(
+        LOG_FILE,
+        trimmed
+    );
 }
 
-// ============================================================
-// TERMINAL SESSION DISPLAY
-// ============================================================
+/* =========================================================
+   PHONE NUMBER
+========================================================= */
 
-function displaySession(sessionId, phone) {
+function cleanNumber(number) {
 
-    console.log("");
-    console.log(
-        "============================================================"
-    );
-
-    console.log(
-        `🔥 ${BOT_NAME} SESSION GENERATED`
-    );
-
-    console.log(
-        `📱 Phone: ${phone || "unknown"}`
-    );
-
-    console.log(
-        `🧩 Length: ${sessionId.length} characters`
-    );
-
-    console.log("");
-    console.log(
-        "SESSION_ID:"
-    );
-
-    console.log(sessionId);
-
-    console.log("");
-    console.log(
-        "============================================================"
-    );
-    console.log("");
+    return String(
+        number || ""
+    )
+        .replace(
+            /\D/g,
+            ""
+        );
 }
 
-// ============================================================
-// COMMAND LOADER
-// ============================================================
+/* =========================================================
+   SESSION ID
+========================================================= */
 
-function loadCommands() {
+function sessionName(number) {
+
+    return cleanNumber(
+        number
+    );
+}
+
+function authPath(number) {
+
+    return path.join(
+        AUTH_DIR,
+        sessionName(number)
+    );
+}
+
+/* =========================================================
+   USERS
+========================================================= */
+
+async function getUsers() {
+
+    return await readJSON(
+        USERS_FILE,
+        []
+    );
+}
+
+async function saveUsers(users) {
+
+    await writeJSON(
+        USERS_FILE,
+        users
+    );
+}
+
+async function findUser(number) {
+
+    number =
+        cleanNumber(
+            number
+        );
+
+    const users =
+        await getUsers();
+
+    return users.find(
+        user =>
+            user.number ===
+            number
+    );
+}
+
+/* =========================================================
+   SETTINGS
+========================================================= */
+
+const DEFAULT_SETTINGS = {
+
+    mode: "public",
+
+    antilink: false,
+
+    antidelete: false,
+
+    antiviewonce: false,
+
+    viewonce: false,
+
+    welcome: true,
+
+    goodbye: true
+
+};
+
+async function getSettings(number) {
+
+    const all =
+        await readJSON(
+            SETTINGS_FILE,
+            {}
+        );
+
+    return {
+        ...DEFAULT_SETTINGS,
+        ...(all[number] || {})
+    };
+}
+
+async function saveSettings(
+    number,
+    settings
+) {
+
+    const all =
+        await readJSON(
+            SETTINGS_FILE,
+            {}
+        );
+
+    all[number] = {
+        ...DEFAULT_SETTINGS,
+        ...settings
+    };
+
+    await writeJSON(
+        SETTINGS_FILE,
+        all
+    );
+}
+
+/* =========================================================
+   COMMAND LOADER
+========================================================= */
+
+async function loadCommands() {
 
     commands.clear();
 
-    if (!fs.existsSync(COMMANDS_DIR)) {
-        console.log(
-            "[COMMANDS] ⚠️ commands folder not found"
-        );
+    if (
+        !fs.existsSync(
+            COMMANDS_DIR
+        )
+    ) {
         return;
     }
 
     const files =
-        fs.readdirSync(COMMANDS_DIR)
-            .filter(file =>
-                file.endsWith(".js")
-            );
+        await fsp.readdir(
+            COMMANDS_DIR
+        );
 
-    for (const file of files) {
+    for (
+        const file of files
+    ) {
+
+        if (
+            !file.endsWith(".js")
+        ) {
+            continue;
+        }
 
         try {
 
+            const fullPath =
+                path.join(
+                    COMMANDS_DIR,
+                    file
+                );
+
+            delete require.cache[
+                require.resolve(
+                    fullPath
+                )
+            ];
+
             const command =
-                require(
-                    path.join(COMMANDS_DIR, file)
+                require(fullPath);
+
+            const name =
+                command.name ||
+                path.basename(
+                    file,
+                    ".js"
                 );
 
-            if (!command) continue;
-
-            const names = [];
-
-            if (command.name) {
-                names.push(command.name);
-            }
-
-            if (Array.isArray(command.command)) {
-                names.push(...command.command);
-            }
-
-            if (Array.isArray(command.alias)) {
-                names.push(...command.alias);
-            }
-
-            if (typeof command === "function") {
-
-                commands.set(
-                    file.replace(".js", ""),
-                    {
-                        name:
-                            file.replace(".js", ""),
-                        execute: command
-                    }
-                );
-
-                continue;
-            }
+            commands.set(
+                name.toLowerCase(),
+                command
+            );
 
             if (
-                typeof command.execute ===
-                "function"
+                Array.isArray(
+                    command.aliases
+                )
             ) {
 
-                if (!names.length) {
-                    names.push(
-                        file.replace(".js", "")
-                    );
-                }
-
-                for (const name of names) {
+                for (
+                    const alias
+                    of command.aliases
+                ) {
 
                     commands.set(
-                        String(name).toLowerCase(),
+                        alias.toLowerCase(),
                         command
                     );
                 }
             }
 
-        } catch (err) {
+        } catch (error) {
 
             console.error(
-                `[COMMANDS] Failed ${file}:`,
-                err.message
+                `[COMMAND ERROR] ${file}`,
+                error
             );
         }
     }
@@ -600,340 +424,612 @@ function loadCommands() {
     );
 }
 
-// ============================================================
-// SESSION DATABASE SAVE
-// ============================================================
+/* =========================================================
+   MESSAGE TEXT
+========================================================= */
 
-async function saveSessionDatabase(data) {
+function getMessageText(
+    message
+) {
 
-    if (!SessionModel) return;
+    if (!message) {
+        return "";
+    }
 
-    try {
+    if (
+        message.conversation
+    ) {
+        return message.conversation;
+    }
 
-        await SessionModel.findOneAndUpdate(
-
-            {
-                sessionId: data.sessionId
-            },
-
-            {
-                $set: data
-            },
-
-            {
-                upsert: true,
-                new: true
-            }
-        );
-
-    } catch (err) {
-
-        console.error(
-            "[MONGO] Session save error:",
-            err.message
+    if (
+        message.extendedTextMessage
+    ) {
+        return (
+            message
+                .extendedTextMessage
+                .text ||
+            ""
         );
     }
-}
 
-// ============================================================
-// SESSION DATABASE DELETE
-// ============================================================
-
-async function deleteSessionDatabase(sessionId) {
-
-    if (!SessionModel) return;
-
-    try {
-
-        await SessionModel.deleteOne({
-            sessionId
-        });
-
-    } catch (err) {
-
-        console.error(
-            "[MONGO] Session delete error:",
-            err.message
+    if (
+        message.imageMessage
+    ) {
+        return (
+            message
+                .imageMessage
+                .caption ||
+            ""
         );
     }
-}
 
-// ============================================================
-// STORE
-// ============================================================
-
-const messageStore = new Map();
-
-function rememberMessage(message) {
-
-    if (!message?.key?.id) return;
-
-    const id =
-        message.key.id;
-
-    messageStore.set(
-        id,
-        message
-    );
-
-    if (messageStore.size > 1000) {
-
-        const first =
-            messageStore.keys().next().value;
-
-        messageStore.delete(first);
-    }
-}
-
-function getRememberedMessage(id) {
-
-    return messageStore.get(id);
-}
-
-// ============================================================
-// DOWNLOAD MEDIA
-// ============================================================
-
-async function downloadMessageMedia(message) {
-
-    try {
-
-        const type =
-            getContentType(message.message);
-
-        if (!type) return null;
-
-        let mediaMessage = null;
-
-        if (
-            type === "imageMessage" ||
-            type === "videoMessage" ||
-            type === "audioMessage" ||
-            type === "documentMessage"
-        ) {
-
-            mediaMessage =
-                message.message[type];
-
-        } else {
-
-            return null;
-        }
-
-        const stream =
-            await downloadContentFromMessage(
-                mediaMessage,
-                type.replace("Message", "")
-            );
-
-        const chunks = [];
-
-        for await (const chunk of stream) {
-            chunks.push(chunk);
-        }
-
-        return Buffer.concat(chunks);
-
-    } catch (err) {
-
-        console.error(
-            "[MEDIA] Download error:",
-            err.message
+    if (
+        message.videoMessage
+    ) {
+        return (
+            message
+                .videoMessage
+                .caption ||
+            ""
         );
-
-        return null;
-    }
-}
-
-// ============================================================
-// ANTI LINK
-// ============================================================
-
-function containsLink(text) {
-
-    if (!text) return false;
-
-    return /(https?:\/\/|www\.|chat\.whatsapp\.com\/)/i
-        .test(text);
-}
-
-// ============================================================
-// EXTRACT TEXT
-// ============================================================
-
-function getMessageText(message) {
-
-    if (!message?.message) return "";
-
-    const msg =
-        message.message;
-
-    if (msg.conversation) {
-        return msg.conversation;
     }
 
-    if (msg.extendedTextMessage) {
-        return msg.extendedTextMessage.text || "";
-    }
-
-    if (msg.imageMessage) {
-        return msg.imageMessage.caption || "";
-    }
-
-    if (msg.videoMessage) {
-        return msg.videoMessage.caption || "";
-    }
-
-    if (msg.documentMessage) {
-        return msg.documentMessage.caption || "";
+    if (
+        message.documentMessage
+    ) {
+        return (
+            message
+                .documentMessage
+                .caption ||
+            ""
+        );
     }
 
     return "";
 }
 
-// ============================================================
-// VIEW ONCE
-// ============================================================
+/* =========================================================
+   UNWRAP MESSAGE
+========================================================= */
 
-function unwrapViewOnce(message) {
+function unwrapMessage(
+    message
+) {
 
-    if (!message?.message) {
-        return message;
-    }
-
-    const msg =
-        message.message;
-
-    if (msg.viewOnceMessage?.message) {
-
-        return {
-            ...message,
-            message:
-                msg.viewOnceMessage.message
-        };
+    if (
+        message?.ephemeralMessage
+    ) {
+        return unwrapMessage(
+            message.ephemeralMessage.message
+        );
     }
 
     if (
-        msg.viewOnceMessageV2?.message
+        message?.viewOnceMessage
     ) {
-
-        return {
-            ...message,
-            message:
-                msg.viewOnceMessageV2.message
-        };
+        return unwrapMessage(
+            message.viewOnceMessage.message
+        );
     }
 
     if (
-        msg.viewOnceMessageV2Extension?.message
+        message?.viewOnceMessageV2
     ) {
+        return unwrapMessage(
+            message.viewOnceMessageV2.message
+        );
+    }
 
-        return {
-            ...message,
-            message:
-                msg.viewOnceMessageV2Extension.message
-        };
+    if (
+        message?.viewOnceMessageV2Extension
+    ) {
+        return unwrapMessage(
+            message
+                .viewOnceMessageV2Extension
+                .message
+        );
     }
 
     return message;
 }
 
-// ============================================================
-// CONNECTION MESSAGE
-// ============================================================
+/* =========================================================
+   ADMIN CHECK
+========================================================= */
 
-async function sendWelcome(sock, phone) {
+function isAdminRequest(
+    req
+) {
+
+    const token =
+        req.headers[
+            "x-admin-token"
+        ] ||
+        req.query.token ||
+        req.body?.token;
+
+    return token ===
+        ADMIN_TOKEN;
+}
+
+function requireAdmin(
+    req,
+    res,
+    next
+) {
+
+    if (
+        !isAdminRequest(
+            req
+        )
+    ) {
+
+        return res.status(
+            401
+        ).json({
+            success: false,
+            error:
+                "Unauthorized"
+        });
+    }
+
+    next();
+}
+
+/* =========================================================
+   GROUP ADMIN
+========================================================= */
+
+async function isGroupAdmin(
+    sock,
+    jid,
+    participant
+) {
 
     try {
 
-        const jid =
-            normalizeJid(phone);
+        const metadata =
+            await sock.groupMetadata(
+                jid
+            );
 
-        if (!jid) return;
+        const member =
+            metadata.participants.find(
+                p =>
+                    p.id ===
+                    participant
+            );
 
-        await sock.sendMessage(jid, {
-
-            text:
-`*${BOT_NAME}*
-
-✅ Connected successfully.
-
-Your WhatsApp bot is now online.
-
-Prefix: ${PREFIX}
-Mode: ${BOT_MODE}
-
-🌐 Pairing:
-${PAIRING_SITE}
-
-⚡ Powered by ETIAS-TECH`
-
-        });
-
-    } catch (err) {
-
-        console.error(
-            "[WELCOME] Error:",
-            err.message
+        return Boolean(
+            member &&
+            (
+                member.admin ===
+                    "admin" ||
+                member.admin ===
+                    "superadmin"
+            )
         );
+
+    } catch {
+
+        return false;
     }
 }
 
-// ============================================================
-// HANDLE COMMAND
-// ============================================================
+/* =========================================================
+   ANTILINK
+========================================================= */
 
-async function executeCommand(
+const LINK_REGEX =
+    /(https?:\/\/|www\.|chat\.whatsapp\.com\/|t\.me\/|discord\.gg\/)/i;
+
+async function handleAntilink(
     sock,
     message,
-    session
+    settings
 ) {
 
-    const text =
-        getMessageText(message)
-            .trim();
-
-    if (!text.startsWith(PREFIX)) {
+    if (
+        !settings.antilink
+    ) {
         return false;
     }
 
-    const withoutPrefix =
-        text.slice(PREFIX.length)
-            .trim();
+    const jid =
+        message.key.remoteJid;
 
-    if (!withoutPrefix) {
-        return false;
-    }
-
-    const parts =
-        withoutPrefix.split(/\s+/);
-
-    const commandName =
-        parts.shift()
-            .toLowerCase();
-
-    const args =
-        parts;
-
-    const command =
-        commands.get(commandName);
-
-    if (!command) {
+    if (
+        !jid ||
+        !jid.endsWith("@g.us")
+    ) {
         return false;
     }
 
     const sender =
-        message.key?.participant ||
-        message.key?.remoteJid ||
-        "";
+        message.key.participant;
 
-    const chat =
-        message.key?.remoteJid ||
-        "";
+    const text =
+        getMessageText(
+            message.message
+        );
 
-    const isOwner =
-        cleanPhone(sender) ===
-        cleanPhone(OWNER_NUMBER);
+    if (
+        !LINK_REGEX.test(
+            text
+        )
+    ) {
+        return false;
+    }
+
+    /*
+     * Don't remove group admins.
+     */
+    if (
+        await isGroupAdmin(
+            sock,
+            jid,
+            sender
+        )
+    ) {
+        return false;
+    }
+
+    try {
+
+        await sock.sendMessage(
+            jid,
+            {
+                delete:
+                    message.key
+            }
+        );
+
+        await sock.sendMessage(
+            jid,
+            {
+                text:
+                    "🚫 Links are not allowed in this group."
+            }
+        );
+
+        return true;
+
+    } catch (error) {
+
+        console.error(
+            "[ANTILINK]",
+            error.message
+        );
+
+        return false;
+    }
+}
+
+/* =========================================================
+   WELCOME / GOODBYE
+========================================================= */
+
+async function handleGroupParticipants(
+    sock,
+    update,
+    settings
+) {
+
+    if (
+        !settings.welcome &&
+        !settings.goodbye
+    ) {
+        return;
+    }
+
+    const {
+        id,
+        participants,
+        action
+    } = update;
+
+    if (
+        action === "add" &&
+        settings.welcome
+    ) {
+
+        for (
+            const participant
+            of participants
+        ) {
+
+            await sock.sendMessage(
+                id,
+                {
+                    text:
+                        `👋 Welcome @${participant.split("@")[0]}!\n\n` +
+                        `Welcome to the group. Enjoy your stay!`,
+                    mentions: [
+                        participant
+                    ]
+                }
+            );
+        }
+    }
+
+    if (
+        (
+            action === "remove" ||
+            action === "leave"
+        ) &&
+        settings.goodbye
+    ) {
+
+        for (
+            const participant
+            of participants
+        ) {
+
+            await sock.sendMessage(
+                id,
+                {
+                    text:
+                        `👋 Goodbye @${participant.split("@")[0]}!`,
+                    mentions: [
+                        participant
+                    ]
+                }
+            );
+        }
+    }
+}
+
+/* =========================================================
+   ANTIVIEWONCE / VIEWONCE
+========================================================= */
+
+async function handleViewOnce(
+    sock,
+    message,
+    settings
+) {
+
+    if (
+        !message.message
+    ) {
+        return false;
+    }
+
+    const raw =
+        message.message;
+
+    const isViewOnce =
+        Boolean(
+            raw.viewOnceMessage ||
+            raw.viewOnceMessageV2 ||
+            raw.viewOnceMessageV2Extension
+        );
+
+    if (
+        !isViewOnce
+    ) {
+        return false;
+    }
+
+    if (
+        !settings.antiviewonce &&
+        !settings.viewonce
+    ) {
+        return false;
+    }
+
+    const unwrapped =
+        unwrapMessage(
+            raw
+        );
+
+    const content =
+        unwrapped;
+
+    const remoteJid =
+        message.key.remoteJid;
+
+    /*
+     * If viewonce mode is enabled,
+     * re-send the media without view-once.
+     */
+    if (
+        settings.viewonce
+    ) {
+
+        try {
+
+            if (
+                content.imageMessage
+            ) {
+
+                const buffer =
+                    await downloadMediaMessage(
+                        message,
+                        "buffer",
+                        {},
+                        {
+                            logger,
+                            reuploadRequest:
+                                sock.updateMediaMessage
+                        }
+                    );
+
+                await sock.sendMessage(
+                    remoteJid,
+                    {
+                        image: buffer,
+                        caption:
+                            content
+                                .imageMessage
+                                .caption ||
+                            ""
+                    }
+                );
+
+                return true;
+            }
+
+            if (
+                content.videoMessage
+            ) {
+
+                const buffer =
+                    await downloadMediaMessage(
+                        message,
+                        "buffer",
+                        {},
+                        {
+                            logger,
+                            reuploadRequest:
+                                sock.updateMediaMessage
+                        }
+                    );
+
+                await sock.sendMessage(
+                    remoteJid,
+                    {
+                        video: buffer,
+                        caption:
+                            content
+                                .videoMessage
+                                .caption ||
+                            ""
+                    }
+                );
+
+                return true;
+            }
+
+            if (
+                content.audioMessage
+            ) {
+
+                const buffer =
+                    await downloadMediaMessage(
+                        message,
+                        "buffer",
+                        {},
+                        {
+                            logger,
+                            reuploadRequest:
+                                sock.updateMediaMessage
+                        }
+                    );
+
+                await sock.sendMessage(
+                    remoteJid,
+                    {
+                        audio: buffer,
+                        mimetype:
+                            content
+                                .audioMessage
+                                .mimetype ||
+                            "audio/mpeg"
+                    }
+                );
+
+                return true;
+            }
+
+        } catch (error) {
+
+            console.error(
+                "[VIEWONCE]",
+                error.message
+            );
+        }
+    }
+
+    /*
+     * antiviewonce is enabled but
+     * viewonce forwarding isn't enabled.
+     */
+    if (
+        settings.antiviewonce
+    ) {
+
+        try {
+
+            await sock.sendMessage(
+                remoteJid,
+                {
+                    text:
+                        "👁️ View-once media detected."
+                }
+            );
+
+        } catch {}
+
+        return true;
+    }
+
+    return false;
+}
+
+/* =========================================================
+   COMMAND HANDLER
+========================================================= */
+
+async function handleCommand(
+    sock,
+    message,
+    user
+) {
+
+    const settings =
+        await getSettings(
+            user.number
+        );
+
+    const body =
+        getMessageText(
+            message.message
+        ).trim();
+
+    if (!body) {
+        return false;
+    }
+
+    const prefix =
+        process.env.PREFIX ||
+        ".";
+
+    if (
+        !body.startsWith(
+            prefix
+        )
+    ) {
+        return false;
+    }
+
+    const args =
+        body
+            .slice(
+                prefix.length
+            )
+            .trim()
+            .split(/\s+/);
+
+    const commandName =
+        (
+            args.shift() ||
+            ""
+        ).toLowerCase();
+
+    if (!commandName) {
+        return false;
+    }
+
+    const command =
+        commands.get(
+            commandName
+        );
+
+    if (!command) {
+        return false;
+    }
 
     const context = {
 
@@ -941,55 +1037,59 @@ async function executeCommand(
 
         message,
 
-        session,
+        user,
+
+        settings,
 
         args,
 
-        text,
+        text:
+            args.join(" "),
 
-        command: commandName,
+        prefix,
 
-        sender,
+        jid:
+            message.key.remoteJid,
 
-        chat,
+        sender:
+            message.key.participant ||
+            message.key.remoteJid,
 
-        isOwner,
-
-        botName: BOT_NAME,
-
-        prefix: PREFIX,
-
-        mode: BOT_MODE,
-
-        send: async content => {
-
-            return sock.sendMessage(
-                chat,
-                content,
-                {
-                    quoted: message
-                }
-            );
-        },
+        isGroup:
+            Boolean(
+                message.key.remoteJid &&
+                message.key.remoteJid.endsWith(
+                    "@g.us"
+                )
+            ),
 
         reply: async text => {
 
             return sock.sendMessage(
-                chat,
+                message.key.remoteJid,
                 {
                     text
                 },
                 {
-                    quoted: message
+                    quoted:
+                        message
                 }
             );
         }
-
     };
 
     try {
 
         if (
+            typeof command ===
+            "function"
+        ) {
+
+            await command(
+                context
+            );
+
+        } else if (
             typeof command.execute ===
             "function"
         ) {
@@ -998,10 +1098,7 @@ async function executeCommand(
                 context
             );
 
-            return true;
-        }
-
-        if (
+        } else if (
             typeof command.run ===
             "function"
         ) {
@@ -1010,362 +1107,399 @@ async function executeCommand(
                 context
             );
 
-            return true;
-        }
+        } else if (
+            typeof command.handler ===
+            "function"
+        ) {
 
-        if (typeof command === "function") {
-
-            await command(
+            await command.handler(
                 context
             );
-
-            return true;
         }
 
-    } catch (err) {
+        return true;
+
+    } catch (error) {
 
         console.error(
-            `[COMMAND] ${commandName}:`,
-            err
+            `[COMMAND ERROR] ${commandName}`,
+            error
         );
 
-        try {
+        await context.reply(
+            "❌ Command error: " +
+            error.message
+        );
 
-            await context.reply(
-                `❌ Command error: ${err.message}`
-            );
-
-        } catch (_) {}
+        return true;
     }
-
-    return false;
 }
 
-// ============================================================
-// HANDLE MESSAGE
-// ============================================================
+/* =========================================================
+   BUILT-IN MODE COMMANDS
+========================================================= */
+
+async function handleBuiltIn(
+    sock,
+    message,
+    user
+) {
+
+    const body =
+        getMessageText(
+            message.message
+        ).trim();
+
+    const prefix =
+        process.env.PREFIX ||
+        ".";
+
+    if (
+        !body.startsWith(
+            prefix
+        )
+    ) {
+        return false;
+    }
+
+    const args =
+        body
+            .slice(
+                prefix.length
+            )
+            .trim()
+            .split(/\s+/);
+
+    const cmd =
+        (
+            args.shift() ||
+            ""
+        ).toLowerCase();
+
+    if (
+        cmd !== "mode"
+    ) {
+        return false;
+    }
+
+    const mode =
+        (
+            args[0] ||
+            ""
+        ).toLowerCase();
+
+    if (
+        ![
+            "public",
+            "private"
+        ].includes(
+            mode
+        )
+    ) {
+
+        await sock.sendMessage(
+            message.key.remoteJid,
+            {
+                text:
+                    "Usage: .mode public\n" +
+                    "or\n" +
+                    ".mode private"
+            }
+        );
+
+        return true;
+    }
+
+    await saveSettings(
+        user.number,
+        {
+            ...(await getSettings(
+                user.number
+            )),
+            mode
+        }
+    );
+
+    await sock.sendMessage(
+        message.key.remoteJid,
+        {
+            text:
+                `✅ Bot mode changed to: ${mode}`
+        }
+    );
+
+    return true;
+}
+
+/* =========================================================
+   MESSAGE HANDLER
+========================================================= */
 
 async function handleMessage(
     sock,
     message,
-    session
+    user
 ) {
 
-    if (!message?.message) {
+    if (
+        !message ||
+        !message.message
+    ) {
         return;
     }
-
-    if (message.key?.fromMe) {
-        return;
-    }
-
-    rememberMessage(message);
-
-    let msg =
-        unwrapViewOnce(message);
-
-    const remoteJid =
-        msg.key?.remoteJid;
-
-    if (!remoteJid) return;
-
-    const text =
-        getMessageText(msg);
-
-    // ========================================================
-    // ANTI-LINK
-    // ========================================================
 
     if (
-        session.antiLink &&
-        containsLink(text)
+        message.key.fromMe
     ) {
-
-        try {
-
-            if (
-                remoteJid.endsWith("@g.us")
-            ) {
-
-                await sock.sendMessage(
-                    remoteJid,
-                    {
-                        text:
-                            "🚫 Links are not allowed."
-                    },
-                    {
-                        quoted: msg
-                    }
-                );
-            }
-
-        } catch (_) {}
+        return;
     }
 
-    // ========================================================
-    // VIEW ONCE
-    // ========================================================
-
-    const originalType =
-        getContentType(
-            message.message
+    const settings =
+        await getSettings(
+            user.number
         );
 
-    const isViewOnce =
-        originalType ===
-            "viewOnceMessage" ||
-        originalType ===
-            "viewOnceMessageV2" ||
-        originalType ===
-            "viewOnceMessageV2Extension";
-
+    /*
+     * Expiry check.
+     */
     if (
-        isViewOnce &&
-        session.antiViewOnce
+        user.expiresAt &&
+        Date.now() >
+            new Date(
+                user.expiresAt
+            ).getTime()
     ) {
 
-        try {
+        await log(
+            "warn",
+            "Session expired",
+            user.number
+        );
 
-            const inner =
-                unwrapViewOnce(message);
-
-            const innerType =
-                getContentType(
-                    inner.message
-                );
-
-            if (
-                innerType ===
-                    "imageMessage" ||
-                innerType ===
-                    "videoMessage"
-            ) {
-
-                const media =
-                    await downloadMessageMedia(
-                        inner
-                    );
-
-                if (media) {
-
-                    await sock.sendMessage(
-                        remoteJid,
-                        {
-                            [innerType === "imageMessage"
-                                ? "image"
-                                : "video"]: media,
-
-                            caption:
-                                "👁️ View-once recovered."
-                        },
-                        {
-                            quoted: message
-                        }
-                    );
-                }
-            }
-
-        } catch (err) {
-
-            console.error(
-                "[VIEWONCE]",
-                err.message
-            );
-        }
+        return;
     }
 
-    // ========================================================
-    // COMMANDS
-    // ========================================================
+    /*
+     * View-once handling.
+     */
+    const viewOnceHandled =
+        await handleViewOnce(
+            sock,
+            message,
+            settings
+        );
 
-    await executeCommand(
+    if (
+        viewOnceHandled
+    ) {
+        return;
+    }
+
+    /*
+     * Antilink.
+     */
+    const linkHandled =
+        await handleAntilink(
+            sock,
+            message,
+            settings
+        );
+
+    if (
+        linkHandled
+    ) {
+        return;
+    }
+
+    /*
+     * Public/private mode.
+     */
+    const body =
+        getMessageText(
+            message.message
+        ).trim();
+
+    const prefix =
+        process.env.PREFIX ||
+        ".";
+
+    const isCommand =
+        body.startsWith(
+            prefix
+        );
+
+    if (
+        settings.mode ===
+            "private" &&
+        !isCommand
+    ) {
+        return;
+    }
+
+    /*
+     * Built-in commands.
+     */
+    const builtIn =
+        await handleBuiltIn(
+            sock,
+            message,
+            user
+        );
+
+    if (
+        builtIn
+    ) {
+        return;
+    }
+
+    /*
+     * External commands.
+     */
+    await handleCommand(
         sock,
-        msg,
-        session
+        message,
+        user
     );
 }
 
-// ============================================================
-// ANTI DELETE
-// ============================================================
+/* =========================================================
+   ANTIDELETE
+========================================================= */
 
-async function handleMessageDelete(
+function setupAntidelete(
     sock,
-    update,
-    session
+    user
 ) {
 
-    if (!session.antiDelete) {
+    sock.ev.on(
+        "messages.delete",
+        async event => {
+
+            const settings =
+                await getSettings(
+                    user.number
+                );
+
+            if (
+                !settings.antidelete
+            ) {
+                return;
+            }
+
+            await log(
+                "info",
+                "Message deletion event received",
+                user.number
+            );
+
+            /*
+             * Full recovery of deleted media/text
+             * requires a message store. This handler
+             * records the event without claiming
+             * deleted content can always be recovered.
+             */
+            try {
+
+                if (
+                    event?.keys?.length
+                ) {
+
+                    for (
+                        const key
+                        of event.keys
+                    ) {
+
+                        console.log(
+                            `[ANTIDELETE] Deleted message in ${key.remoteJid}`
+                        );
+                    }
+                }
+
+            } catch (
+                error
+            ) {
+
+                console.error(
+                    "[ANTIDELETE]",
+                    error.message
+                );
+            }
+        }
+    );
+}
+
+/* =========================================================
+   CONNECT SESSION
+========================================================= */
+
+async function connectSession(
+    user
+) {
+
+    const number =
+        cleanNumber(
+            user.number
+        );
+
+    const folder =
+        authPath(
+            number
+        );
+
+    if (
+        !fs.existsSync(
+            path.join(
+                folder,
+                "creds.json"
+            )
+        )
+    ) {
+
+        await log(
+            "error",
+            "creds.json not found",
+            number
+        );
+
         return;
     }
 
-    try {
+    if (
+        sessions.has(
+            number
+        )
+    ) {
 
-        const key =
-            update.keys?.[0];
-
-        if (!key) return;
-
-        const deleted =
-            getRememberedMessage(
-                key.id
-            );
-
-        if (!deleted) return;
-
-        const chat =
-            key.remoteJid;
-
-        if (!chat) return;
-
-        const text =
-            getMessageText(deleted);
-
-        if (text) {
-
-            await sock.sendMessage(
-                chat,
-                {
-                    text:
-`🗑️ *Deleted Message*
-
-${text}`
-                }
-            );
-
-            return;
-        }
-
-        const type =
-            getContentType(
-                deleted.message
+        const existing =
+            sessions.get(
+                number
             );
 
         if (
-            type === "imageMessage" ||
-            type === "videoMessage"
+            existing.socket
         ) {
-
-            const media =
-                await downloadMessageMedia(
-                    deleted
-                );
-
-            if (!media) return;
-
-            await sock.sendMessage(
-                chat,
-                {
-                    [type === "imageMessage"
-                        ? "image"
-                        : "video"]: media,
-
-                    caption:
-                        "🗑️ Deleted media recovered."
-                }
-            );
+            return existing.socket;
         }
-
-    } catch (err) {
-
-        console.error(
-            "[ANTIDELETE]",
-            err.message
-        );
     }
-}
 
-// ============================================================
-// CREATE WHATSAPP SESSION
-// ============================================================
-
-async function createSession(options = {}) {
-
-    const {
-
-        sessionId:
-            suppliedSessionId,
-
-        phone,
-
-        userId,
-
-        days =
-            SESSION_EXPIRY_DAYS
-
-    } = options;
-
-    const sessionId =
-        suppliedSessionId ||
-        generateSessionId();
-
-    const safeId =
-        safeSessionName(sessionId);
-
-    const authPath =
-        sessionFolder(safeId);
-
-    fs.mkdirSync(
-        authPath,
-        {
-            recursive: true
-        }
+    await log(
+        "info",
+        "Connecting WhatsApp session...",
+        number
     );
 
     const {
-
         state,
         saveCreds
-
     } =
         await useMultiFileAuthState(
-            authPath
+            folder
         );
-
-    let version;
-
-    try {
-
-        const latest =
-            await fetchLatestBaileysVersion();
-
-        version =
-            latest.version;
-
-        console.log(
-            `[BAILEYS] Using version ${version.join(".")}`
-        );
-
-    } catch (_) {
-
-        version =
-            [2, 3000, 1015901307];
-    }
-
-    const logger =
-        pino({
-            level:
-                process.env.LOG_LEVEL ||
-                "silent"
-        });
 
     const sock =
         makeWASocket({
 
-            version,
-
-            logger,
-
-            printQRInTerminal:
-                false,
-
-            browser:
-                Browsers.macOS(
-                    "Chrome"
-                ),
-
             auth: {
-
                 creds:
                     state.creds,
 
@@ -1376,117 +1510,151 @@ async function createSession(options = {}) {
                     )
             },
 
-            generateHighQualityLinkPreview:
-                true,
+            logger,
+
+            browser:
+                Browsers.macOS(
+                    "Chrome"
+                ),
 
             markOnlineOnConnect:
                 false,
 
             syncFullHistory:
-                false
+                false,
 
+            generateHighQualityLinkPreview:
+                false,
+
+            connectTimeoutMs:
+                60000,
+
+            defaultQueryTimeoutMs:
+                60000,
+
+            keepAliveIntervalMs:
+                25000
         });
 
-    const session = {
-
-        id: sessionId,
-
-        sessionId,
-
-        phone:
-            phone ||
-            sock.user?.id?.split(":")[0] ||
-            "",
-
-        userId:
-
-            userId ||
-            phone ||
-            "",
-
-        sock,
-
-        connected: false,
-
-        reconnecting: false,
-
-        createdAt:
-            new Date(),
-
-        expireAt:
-            new Date(
-                Date.now() +
-                days *
-                24 *
-                60 *
-                60 *
-                1000
-            ),
-
-        antiDelete:
-            true,
-
-        antiLink:
-            true,
-
-        antiViewOnce:
-            true,
-
-        viewOnce:
-            true,
-
-        authPath,
-
-        lastDisconnect: null
-
-    };
-
     sessions.set(
-        sessionId,
-        session
+        number,
+        {
+            socket: sock,
+            status:
+                "connecting"
+        }
     );
-
-    // ========================================================
-    // SAVE CREDS
-    // ========================================================
 
     sock.ev.on(
         "creds.update",
         saveCreds
     );
 
-    // ========================================================
-    // CONNECTION
-    // ========================================================
+    setupAntidelete(
+        sock,
+        user
+    );
+
+    sock.ev.on(
+        "group-participants.update",
+        async update => {
+
+            try {
+
+                const settings =
+                    await getSettings(
+                        number
+                    );
+
+                await handleGroupParticipants(
+                    sock,
+                    update,
+                    settings
+                );
+
+            } catch (
+                error
+            ) {
+
+                console.error(
+                    "[GROUP]",
+                    error.message
+                );
+            }
+        }
+    );
+
+    sock.ev.on(
+        "messages.upsert",
+        async event => {
+
+            if (
+                event.type !==
+                    "notify" &&
+                event.type !==
+                    "append"
+            ) {
+                return;
+            }
+
+            for (
+                const message
+                of event.messages
+            ) {
+
+                try {
+
+                    await handleMessage(
+                        sock,
+                        message,
+                        user
+                    );
+
+                } catch (
+                    error
+                ) {
+
+                    console.error(
+                        "[MESSAGE]",
+                        error
+                    );
+                }
+            }
+        }
+    );
 
     sock.ev.on(
         "connection.update",
         async update => {
 
             const {
-
                 connection,
-
-                lastDisconnect,
-
-                qr
-
+                lastDisconnect
             } = update;
-
-            if (qr) {
-
-                console.log(
-                    `[PAIRING] QR received for ${session.phone || sessionId}`
-                );
-            }
 
             if (
                 connection ===
                 "connecting"
             ) {
 
-                console.log(
-                    `[${sessionId.slice(0, 30)}...] 🔄 Connecting...`
+                sessions.set(
+                    number,
+                    {
+                        socket: sock,
+                        status:
+                            "connecting"
+                    }
+                );
+
+                await updateUserStatus(
+                    number,
+                    "connecting"
+                );
+
+                await log(
+                    "info",
+                    "WhatsApp connecting...",
+                    number
                 );
             }
 
@@ -1495,80 +1663,24 @@ async function createSession(options = {}) {
                 "open"
             ) {
 
-                session.connected =
-                    true;
-
-                session.reconnecting =
-                    false;
-
-                session.lastDisconnect =
-                    null;
-
-                if (
-                    sock.user?.id
-                ) {
-
-                    session.phone =
-                        sock.user.id
-                            .split(":")[0]
-                            .replace(
-                                /\D/g,
-                                ""
-                            );
-                }
-
-                console.log("");
-                console.log(
-                    "============================================================"
+                sessions.set(
+                    number,
+                    {
+                        socket: sock,
+                        status:
+                            "connected"
+                    }
                 );
 
-                console.log(
-                    `[WHATSAPP] ✅ CONNECTED`
+                await updateUserStatus(
+                    number,
+                    "connected"
                 );
 
-                console.log(
-                    `[WHATSAPP] 📱 ${session.phone}`
-                );
-
-                console.log(
-                    `[WHATSAPP] 🧩 Session length: ${sessionId.length}`
-                );
-
-                console.log(
-                    `[WHATSAPP] 📁 Auth: ${authPath}`
-                );
-
-                console.log(
-                    "============================================================"
-                );
-                console.log("");
-
-                await saveSessionDatabase({
-
-                    sessionId,
-
-                    phone:
-                        session.phone,
-
-                    userId:
-                        session.userId,
-
-                    connected:
-                        true,
-
-                    days,
-
-                    expireAt:
-                        session.expireAt,
-
-                    createdAt:
-                        session.createdAt
-
-                });
-
-                await sendWelcome(
-                    sock,
-                    session.phone
+                await log(
+                    "success",
+                    "WhatsApp connected. Bot is online.",
+                    number
                 );
             }
 
@@ -1577,1000 +1689,1506 @@ async function createSession(options = {}) {
                 "close"
             ) {
 
-                session.connected =
-                    false;
+                sessions.delete(
+                    number
+                );
 
-                session.lastDisconnect =
-                    lastDisconnect;
-
-                const statusCode =
+                const code =
                     lastDisconnect
                         ?.error
                         ?.output
                         ?.statusCode;
 
-                const loggedOut =
-                    statusCode ===
-                    DisconnectReason.loggedOut;
-
-                const connectionReplaced =
-                    statusCode ===
-                    DisconnectReason.connectionReplaced;
-
-                console.log(
-                    `[WHATSAPP] ❌ Connection closed`
+                await updateUserStatus(
+                    number,
+                    "disconnected"
                 );
 
-                console.log(
-                    `[WHATSAPP] Code: ${statusCode || "unknown"}`
+                await log(
+                    "warn",
+                    `WhatsApp disconnected. Code: ${code || "unknown"}`,
+                    number
                 );
 
                 if (
-                    loggedOut ||
-                    connectionReplaced
+                    code ===
+                    DisconnectReason.loggedOut
                 ) {
 
-                    console.log(
-                        `[WHATSAPP] ❌ Session cannot automatically reconnect`
+                    await log(
+                        "error",
+                        "WhatsApp session logged out.",
+                        number
                     );
-
-                    sessions.delete(
-                        sessionId
-                    );
-
-                    await saveSessionDatabase({
-
-                        sessionId,
-
-                        phone:
-                            session.phone,
-
-                        userId:
-                            session.userId,
-
-                        connected:
-                            false,
-
-                        days,
-
-                        expireAt:
-                            session.expireAt
-                    });
 
                     return;
                 }
 
                 if (
-                    !session.reconnecting
+                    reconnecting.has(
+                        number
+                    )
                 ) {
-
-                    session.reconnecting =
-                        true;
-
-                    console.log(
-                        `[WHATSAPP] 🔄 Reconnecting ${session.phone || sessionId}`
-                    );
-
-                    setTimeout(
-                        async () => {
-
-                            try {
-
-                                await createSession({
-
-                                    sessionId,
-
-                                    phone:
-                                        session.phone,
-
-                                    userId:
-                                        session.userId,
-
-                                    days
-
-                                });
-
-                            } catch (err) {
-
-                                console.error(
-                                    "[RECONNECT] Failed:",
-                                    err.message
-                                );
-
-                            }
-
-                        },
-                        5000
-                    );
+                    return;
                 }
-            }
-        }
-    );
 
-    // ========================================================
-    // MESSAGE EVENTS
-    // ========================================================
+                reconnecting.add(
+                    number
+                );
 
-    sock.ev.on(
-        "messages.upsert",
-        async ({
-            messages,
-            type
-        }) => {
+                await log(
+                    "info",
+                    "Scheduling automatic reconnect...",
+                    number
+                );
 
-            if (
-                type !== "notify" &&
-                type !== "append"
-            ) {
-                return;
-            }
+                setTimeout(
+                    async () => {
 
-            for (
-                const message
-                of messages
-            ) {
-
-                try {
-
-                    await handleMessage(
-                        sock,
-                        message,
-                        session
-                    );
-
-                } catch (err) {
-
-                    console.error(
-                        "[MESSAGE]",
-                        err.message
-                    );
-                }
-            }
-        }
-    );
-
-    // ========================================================
-    // MESSAGE DELETE
-    // ========================================================
-
-    sock.ev.on(
-        "messages.update",
-        async updates => {
-
-            for (
-                const update
-                of updates
-            ) {
-
-                if (
-                    update.update
-                        ?.message ===
-                    null
-                ) {
-
-                    await handleMessageDelete(
-                        sock,
-                        update,
-                        session
-                    );
-                }
-            }
-        }
-    );
-
-    // ========================================================
-    // GROUP PARTICIPANTS
-    // ========================================================
-
-    sock.ev.on(
-        "group-participants.update",
-        async update => {
-
-            try {
-
-                const {
-                    id,
-                    participants,
-                    action
-                } = update;
-
-                if (
-                    action ===
-                    "add"
-                ) {
-
-                    for (
-                        const participant
-                        of participants
-                    ) {
-
-                        await sock.sendMessage(
-                            id,
-                            {
-                                text:
-`👋 Welcome @${participant.split("@")[0]}
-
-Welcome to the group!
-
-Powered by ${BOT_NAME}`,
-
-                                mentions: [
-                                    participant
-                                ]
-                            }
+                        reconnecting.delete(
+                            number
                         );
-                    }
-                }
 
-                if (
-                    action ===
-                    "remove"
-                ) {
+                        const current =
+                            await findUser(
+                                number
+                            );
 
-                    for (
-                        const participant
-                        of participants
-                    ) {
+                        if (
+                            !current
+                        ) {
+                            return;
+                        }
 
-                        await sock.sendMessage(
-                            id,
-                            {
-                                text:
-`👋 Goodbye @${participant.split("@")[0]}`,
+                        if (
+                            current.status ===
+                            "deleted"
+                        ) {
+                            return;
+                        }
 
-                                mentions: [
-                                    participant
-                                ]
-                            }
-                        );
-                    }
-                }
+                        if (
+                            current.expiresAt &&
+                            Date.now() >
+                                new Date(
+                                    current.expiresAt
+                                ).getTime()
+                        ) {
 
-            } catch (err) {
+                            await updateUserStatus(
+                                number,
+                                "expired"
+                            );
 
-                console.error(
-                    "[GROUP]",
-                    err.message
+                            return;
+                        }
+
+                        try {
+
+                            await connectSession(
+                                current
+                            );
+
+                        } catch (
+                            error
+                        ) {
+
+                            await log(
+                                "error",
+                                `Reconnect failed: ${error.message}`,
+                                number
+                            );
+                        }
+
+                    },
+                    5000
                 );
             }
         }
     );
 
-    // ========================================================
-    // SAVE DATABASE
-    // ========================================================
-
-    await saveSessionDatabase({
-
-        sessionId,
-
-        phone:
-            session.phone,
-
-        userId:
-            session.userId,
-
-        connected:
-            false,
-
-        days,
-
-        expireAt:
-            session.expireAt,
-
-        createdAt:
-            session.createdAt
-
-    });
-
-    // ========================================================
-    // SESSION EXPIRY
-    // ========================================================
-
-    const expiryTimer =
-        setInterval(
-            async () => {
-
-                if (
-                    Date.now() >=
-                    session.expireAt.getTime()
-                ) {
-
-                    console.log(
-                        `[SESSION] ⏰ Expired: ${sessionId}`
-                    );
-
-                    clearInterval(
-                        expiryTimer
-                    );
-
-                    try {
-                        await sock.logout();
-                    } catch (_) {}
-
-                    sessions.delete(
-                        sessionId
-                    );
-
-                    await deleteSessionDatabase(
-                        sessionId
-                    );
-                }
-
-            },
-            60000
-        );
-
-    // ========================================================
-    // PAIRING CODE
-    // ========================================================
-
-    if (
-        phone &&
-        !state.creds.registered
-    ) {
-
-        const clean =
-            cleanPhone(phone);
-
-        if (clean) {
-
-            try {
-
-                await sleep(2000);
-
-                console.log(
-                    `[PAIRING] Requesting code for ${clean}`
-                );
-
-                const code =
-                    await sock.requestPairingCode(
-                        clean
-                    );
-
-                console.log("");
-                console.log(
-                    "============================================================"
-                );
-
-                console.log(
-                    `📱 PAIRING CODE FOR ${clean}`
-                );
-
-                console.log(
-                    code
-                );
-
-                console.log(
-                    "============================================================"
-                );
-                console.log("");
-
-            } catch (err) {
-
-                console.error(
-                    "[PAIRING] ❌ Failed:",
-                    err.message
-                );
-            }
-        }
-    }
-
-    return session;
+    return sock;
 }
 
-// ============================================================
-// DEPLOY SESSION
-// ============================================================
+/* =========================================================
+   USER STATUS
+========================================================= */
 
-async function deploySession(
-    phone,
-    userId
+async function updateUserStatus(
+    number,
+    status
 ) {
 
-    phone =
-        cleanPhone(phone);
+    const users =
+        await getUsers();
 
-    if (!phone) {
-        throw new Error(
-            "Invalid phone number"
+    const index =
+        users.findIndex(
+            user =>
+                user.number ===
+                number
         );
+
+    if (
+        index === -1
+    ) {
+        return;
     }
 
-    const sessionId =
-        generateSessionId();
+    users[index].status =
+        status;
 
-    const folder =
-        sessionFolder(
-            sessionId
-        );
+    users[index].updatedAt =
+        new Date().toISOString();
 
-    saveSessionIdFile(
-        sessionId,
-        folder
+    await saveUsers(
+        users
     );
-
-    // IMPORTANT:
-    // Display complete long session in terminal.
-    displaySession(
-        sessionId,
-        phone
-    );
-
-    const session =
-        await createSession({
-
-            sessionId,
-
-            phone,
-
-            userId
-
-        });
-
-    // ========================================================
-    // SEND SESSION AS FILE AFTER CONNECTION
-    // ========================================================
-
-    const check =
-        setInterval(
-            async () => {
-
-                if (
-                    session.connected
-                ) {
-
-                    clearInterval(
-                        check
-                    );
-
-                    await sendSessionFile(
-                        session.sock,
-                        phone,
-                        sessionId
-                    );
-                }
-
-            },
-            2000
-        );
-
-    // Stop checking after 5 minutes.
-    setTimeout(
-        () => {
-            clearInterval(check);
-        },
-        5 * 60 * 1000
-    );
-
-    return {
-
-        sessionId,
-
-        phone,
-
-        connected:
-            session.connected,
-
-        expireAt:
-            session.expireAt
-
-    };
 }
 
-// ============================================================
-// API: DEPLOY
-// ============================================================
+/* =========================================================
+   DECODE SESSION CODE
+========================================================= */
 
-app.post(
-    "/deploy",
-    async (req, res) => {
+function decodeSessionCode(
+    code
+) {
 
-        try {
-
-            const {
-                phone,
-                userId
-            } = req.body;
-
-            if (!phone) {
-
-                return res.status(400)
-                    .json({
-
-                        success: false,
-
-                        error:
-                            "phone is required"
-
-                    });
-            }
-
-            const result =
-                await deploySession(
-                    phone,
-                    userId
-                );
-
-            res.json({
-
-                success: true,
-
-                message:
-                    "Session deployment started",
-
-                ...result
-
-            });
-
-        } catch (err) {
-
-            console.error(
-                "[DEPLOY]",
-                err
-            );
-
-            res.status(500)
-                .json({
-
-                    success: false,
-
-                    error:
-                        err.message
-
-                });
-        }
+    if (!code) {
+        throw new Error(
+            "Session code is empty"
+        );
     }
-);
 
-// ============================================================
-// API: MODE
-// ============================================================
+    let raw =
+        String(code).trim();
 
-app.get(
-    "/mode",
-    (req, res) => {
-
-        res.json({
-
-            mode:
-                BOT_MODE
-
-        });
-    }
-);
-
-app.post(
-    "/mode",
-    (req, res) => {
-
-        const mode =
-            req.body.mode;
-
-        if (
-            mode !== "public" &&
-            mode !== "private"
-        ) {
-
-            return res.status(400)
-                .json({
-
-                    success: false,
-
-                    error:
-                        "Mode must be public or private"
-
-                });
-        }
-
-        BOT_MODE =
-            mode;
-
-        console.log(
-            `[MODE] ${BOT_MODE.toUpperCase()}`
+    /*
+     * Remove optional prefixes.
+     */
+    raw =
+        raw.replace(
+            /^ETIAS-MINI-BOT~/,
+            ""
         );
 
-        res.json({
-
-            success: true,
-
-            mode:
-                BOT_MODE
-
-        });
-    }
-);
-
-// ============================================================
-// API: TOTAL USERS
-// ============================================================
-
-app.get(
-    "/total-users",
-    async (req, res) => {
-
-        let total =
-            sessions.size;
-
-        if (SessionModel) {
-
-            try {
-
-                total =
-                    await SessionModel.countDocuments();
-
-            } catch (_) {}
-        }
-
-        res.json({
-            total
-        });
-    }
-);
-
-// ============================================================
-// API: DEPLOY STATS
-// ============================================================
-
-app.get(
-    "/deploy-stats",
-    async (req, res) => {
-
-        let total =
-            sessions.size;
-
-        let connected =
-            0;
-
-        for (
-            const session
-            of sessions.values()
-        ) {
-
-            if (
-                session.connected
-            ) {
-                connected++;
-            }
-        }
-
-        if (SessionModel) {
-
-            try {
-
-                total =
-                    await SessionModel.countDocuments();
-
-                connected =
-                    await SessionModel.countDocuments({
-                        connected: true
-                    });
-
-            } catch (_) {}
-        }
-
-        res.json({
-
-            total,
-
-            connected,
-
-            offline:
-                total - connected
-
-        });
-    }
-);
-
-// ============================================================
-// API: DEPLOYED LIST
-// ============================================================
-
-app.get(
-    "/deployed-list",
-    async (req, res) => {
-
-        if (SessionModel) {
-
-            try {
-
-                const data =
-                    await SessionModel
-                        .find({})
-                        .sort({
-                            createdAt: -1
-                        })
-                        .lean();
-
-                return res.json(data);
-
-            } catch (_) {}
-        }
-
-        const data =
-            [...sessions.values()]
-                .map(session => ({
-
-                    sessionId:
-                        session.sessionId,
-
-                    phone:
-                        session.phone,
-
-                    connected:
-                        session.connected,
-
-                    createdAt:
-                        session.createdAt,
-
-                    expireAt:
-                        session.expireAt
-
-                }));
-
-        res.json(data);
-    }
-);
-
-// ============================================================
-// API: REMOVE SESSION
-// ============================================================
-
-app.post(
-    "/remove",
-    async (req, res) => {
-
-        try {
-
-            const {
-                sessionId
-            } = req.body;
-
-            if (!sessionId) {
-
-                return res.status(400)
-                    .json({
-
-                        success: false,
-
-                        error:
-                            "sessionId required"
-
-                    });
-            }
-
-            const session =
-                sessions.get(
-                    sessionId
-                );
-
-            if (session) {
-
-                try {
-                    await session.sock.logout();
-                } catch (_) {}
-
-                sessions.delete(
-                    sessionId
-                );
-            }
-
-            await deleteSessionDatabase(
-                sessionId
-            );
-
-            res.json({
-
-                success: true
-
-            });
-
-        } catch (err) {
-
-            res.status(500)
-                .json({
-
-                    success: false,
-
-                    error:
-                        err.message
-
-                });
-        }
-    }
-);
-
-// ============================================================
-// LOAD SAVED SESSIONS
-// ============================================================
-
-async function loadSavedSessions() {
-
-    if (!SessionModel) {
-
-        console.log(
-            "[MULTI] MongoDB not available; skipping saved sessions"
+    raw =
+        raw.replace(
+            /^SESSION~/,
+            ""
         );
 
-        return;
+    /*
+     * Try base64 JSON.
+     */
+    let decoded;
+
+    try {
+
+        decoded =
+            Buffer.from(
+                raw,
+                "base64"
+            ).toString(
+                "utf8"
+            );
+
+    } catch {
+
+        decoded =
+            raw;
     }
 
     try {
 
-        const saved =
-            await SessionModel.find({
-
-                expireAt: {
-                    $gt:
-                        new Date()
-                }
-
-            }).lean();
-
-        console.log(
-            `[MULTI] ${saved.length} saved sessions`
+        return JSON.parse(
+            decoded
         );
 
-        for (
-            const item
-            of saved
-        ) {
+    } catch {
 
-            if (
-                !item.sessionId
-            ) {
-                continue;
-            }
+        /*
+         * Also allow raw JSON.
+         */
+        try {
 
-            const folder =
-                sessionFolder(
-                    item.sessionId
-                );
+            return JSON.parse(
+                raw
+            );
 
-            if (
-                !fs.existsSync(folder)
-            ) {
+        } catch {
 
-                console.log(
-                    `[MULTI] Auth missing for ${item.phone || item.sessionId}`
-                );
-
-                continue;
-            }
-
-            try {
-
-                await createSession({
-
-                    sessionId:
-                        item.sessionId,
-
-                    phone:
-                        item.phone,
-
-                    userId:
-                        item.userId,
-
-                    days:
-                        item.days ||
-                        SESSION_EXPIRY_DAYS
-
-                });
-
-                console.log(
-                    `[MULTI] Loaded ${item.phone || item.sessionId}`
-                );
-
-            } catch (err) {
-
-                console.error(
-                    `[MULTI] Failed loading ${item.sessionId}:`,
-                    err.message
-                );
-            }
-
-            await sleep(1000);
+            throw new Error(
+                "Invalid session code. Expected the code generated by the ETIAS pairing server."
+            );
         }
-
-    } catch (err) {
-
-        console.error(
-            "[MULTI] Load error:",
-            err.message
-        );
     }
 }
 
-// ============================================================
-// PROCESS ERRORS
-// ============================================================
+/* =========================================================
+   WRITE SESSION BUNDLE
+========================================================= */
 
-process.on(
-    "uncaughtException",
-    err => {
+async function writeSessionBundle(
+    code,
+    destination
+) {
 
-        console.error(
-            "[PROCESS] Uncaught Exception:",
-            err
+    const bundle =
+        decodeSessionCode(
+            code
+        );
+
+    await fsp.mkdir(
+        destination,
+        {
+            recursive: true
+        }
+    );
+
+    /*
+     * Format used by the pairing server:
+     *
+     * {
+     *   format: "ETIAS-MINI-BOT",
+     *   version: 2,
+     *   files: {
+     *      "creds.json": "base64...",
+     *      "keys/....json": "base64..."
+     *   }
+     * }
+     */
+
+    const files =
+        bundle.files ||
+        bundle.auth ||
+        bundle.data;
+
+    if (
+        !files ||
+        typeof files !==
+            "object"
+    ) {
+
+        throw new Error(
+            "Session bundle contains no auth files"
+        );
+    }
+
+    for (
+        const [
+            relative,
+            value
+        ] of Object.entries(
+            files
+        )
+    ) {
+
+        /*
+         * Prevent path traversal.
+         */
+        const safeRelative =
+            path.normalize(
+                relative
+            );
+
+        if (
+            safeRelative.startsWith(
+                ".."
+            ) ||
+            path.isAbsolute(
+                safeRelative
+            )
+        ) {
+            continue;
+        }
+
+        const target =
+            path.join(
+                destination,
+                safeRelative
+            );
+
+        await fsp.mkdir(
+            path.dirname(
+                target
+            ),
+            {
+                recursive: true
+            }
+        );
+
+        let buffer;
+
+        if (
+            typeof value ===
+            "string"
+        ) {
+
+            buffer =
+                Buffer.from(
+                    value,
+                    "base64"
+                );
+
+        } else if (
+            Array.isArray(
+                value
+            )
+        ) {
+
+            buffer =
+                Buffer.from(
+                    value
+                );
+
+        } else if (
+            value?.base64
+        ) {
+
+            buffer =
+                Buffer.from(
+                    value.base64,
+                    "base64"
+                );
+
+        } else {
+
+            buffer =
+                Buffer.from(
+                    JSON.stringify(
+                        value,
+                        null,
+                        2
+                    )
+                );
+        }
+
+        await fsp.writeFile(
+            target,
+            buffer
+        );
+    }
+
+    const creds =
+        path.join(
+            destination,
+            "creds.json"
+        );
+
+    if (
+        !fs.existsSync(
+            creds
+        )
+    ) {
+
+        throw new Error(
+            "Session bundle was extracted but creds.json is missing"
+        );
+    }
+
+    return bundle;
+}
+
+/* =========================================================
+   DEPLOY USER
+========================================================= */
+
+async function deployUser({
+    number,
+    duration,
+    code
+}) {
+
+    number =
+        cleanNumber(
+            number
+        );
+
+    duration =
+        Number(
+            duration
+        );
+
+    if (
+        !number
+    ) {
+        throw new Error(
+            "User number is required"
+        );
+    }
+
+    if (
+        !Number.isInteger(
+            duration
+        ) ||
+        duration < 1
+    ) {
+
+        throw new Error(
+            "Duration must be at least 1 day"
+        );
+    }
+
+    if (
+        !code
+    ) {
+
+        throw new Error(
+            "Session code is required"
+        );
+    }
+
+    const users =
+        await getUsers();
+
+    const existingIndex =
+        users.findIndex(
+            user =>
+                user.number ===
+                number
+        );
+
+    /*
+     * Remove existing socket if replacing
+     * an existing deployment.
+     */
+    if (
+        sessions.has(
+            number
+        )
+    ) {
+
+        try {
+
+            const old =
+                sessions.get(
+                    number
+                );
+
+            old.socket?.end();
+
+        } catch {}
+
+        sessions.delete(
+            number
+        );
+    }
+
+    const folder =
+        authPath(
+            number
+        );
+
+    /*
+     * Clean previous auth state.
+     */
+    await fsp.rm(
+        folder,
+        {
+            recursive: true,
+            force: true
+        }
+    );
+
+    await fsp.mkdir(
+        folder,
+        {
+            recursive: true
+        }
+    );
+
+    await log(
+        "info",
+        "Extracting session bundle...",
+        number
+    );
+
+    await writeSessionBundle(
+        code,
+        folder
+    );
+
+    const now =
+        new Date();
+
+    const expires =
+        new Date(
+            now.getTime() +
+            duration *
+                24 *
+                60 *
+                60 *
+                1000
+        );
+
+    const user = {
+
+        number,
+
+        duration,
+
+        status:
+            "deploying",
+
+        connected:
+            false,
+
+        authFolder:
+            folder,
+
+        createdAt:
+            existingIndex >= 0
+                ? users[
+                    existingIndex
+                  ].createdAt
+                : now.toISOString(),
+
+        updatedAt:
+            now.toISOString(),
+
+        expiresAt:
+            expires.toISOString()
+    };
+
+    if (
+        existingIndex >= 0
+    ) {
+
+        users[
+            existingIndex
+        ] = {
+            ...users[
+                existingIndex
+            ],
+            ...user
+        };
+
+    } else {
+
+        users.push(
+            user
+        );
+    }
+
+    await saveUsers(
+        users
+    );
+
+    await saveSettings(
+        number,
+        await getSettings(
+            number
+        )
+    );
+
+    await log(
+        "info",
+        "Session extracted successfully.",
+        number
+    );
+
+    /*
+     * Connect immediately.
+     */
+    await connectSession(
+        user
+    );
+
+    return user;
+}
+
+/* =========================================================
+   RENEW USER
+========================================================= */
+
+async function renewUser(
+    number,
+    duration
+) {
+
+    number =
+        cleanNumber(
+            number
+        );
+
+    duration =
+        Number(
+            duration
+        );
+
+    if (
+        !number
+    ) {
+        throw new Error(
+            "Number required"
+        );
+    }
+
+    if (
+        !Number.isInteger(
+            duration
+        ) ||
+        duration < 1
+    ) {
+        throw new Error(
+            "Invalid duration"
+        );
+    }
+
+    const users =
+        await getUsers();
+
+    const index =
+        users.findIndex(
+            user =>
+                user.number ===
+                number
+        );
+
+    if (
+        index === -1
+    ) {
+        throw new Error(
+            "User not found"
+        );
+    }
+
+    const current =
+        new Date();
+
+    const oldExpiry =
+        new Date(
+            users[index]
+                .expiresAt
+        );
+
+    const base =
+        oldExpiry > current
+            ? oldExpiry
+            : current;
+
+    const newExpiry =
+        new Date(
+            base.getTime() +
+            duration *
+                24 *
+                60 *
+                60 *
+                1000
+        );
+
+    users[index]
+        .expiresAt =
+        newExpiry.toISOString();
+
+    users[index]
+        .duration =
+        duration;
+
+    users[index]
+        .status =
+        "connected";
+
+    await saveUsers(
+        users
+    );
+
+    await log(
+        "success",
+        `User renewed for ${duration} day(s).`,
+        number
+    );
+
+    return users[index];
+}
+
+/* =========================================================
+   DELETE USER
+========================================================= */
+
+async function deleteUser(
+    number
+) {
+
+    number =
+        cleanNumber(
+            number
+        );
+
+    const users =
+        await getUsers();
+
+    const index =
+        users.findIndex(
+            user =>
+                user.number ===
+                number
+        );
+
+    if (
+        index === -1
+    ) {
+
+        throw new Error(
+            "User not found"
+        );
+    }
+
+    /*
+     * Stop WhatsApp socket.
+     */
+    if (
+        sessions.has(
+            number
+        )
+    ) {
+
+        try {
+
+            const session =
+                sessions.get(
+                    number
+                );
+
+            session.socket?.end();
+
+        } catch {}
+
+        sessions.delete(
+            number
+        );
+    }
+
+    /*
+     * Remove auth files.
+     */
+    const folder =
+        authPath(
+            number
+        );
+
+    await fsp.rm(
+        folder,
+        {
+            recursive: true,
+            force: true
+        }
+    );
+
+    /*
+     * Remove settings.
+     */
+    const settings =
+        await readJSON(
+            SETTINGS_FILE,
+            {}
+        );
+
+    delete settings[
+        number
+    ];
+
+    await writeJSON(
+        SETTINGS_FILE,
+        settings
+    );
+
+    /*
+     * Remove user.
+     */
+    users.splice(
+        index,
+        1
+    );
+
+    await saveUsers(
+        users
+    );
+
+    await log(
+        "success",
+        "User deleted.",
+        number
+    );
+
+    return true;
+}
+
+/* =========================================================
+   EXPIRY CHECKER
+========================================================= */
+
+async function checkExpiry() {
+
+    const users =
+        await getUsers();
+
+    const now =
+        Date.now();
+
+    for (
+        const user
+        of users
+    ) {
+
+        if (
+            !user.expiresAt
+        ) {
+            continue;
+        }
+
+        if (
+            new Date(
+                user.expiresAt
+            ).getTime() <=
+            now
+        ) {
+
+            if (
+                user.status !==
+                    "expired"
+            ) {
+
+                await log(
+                    "warn",
+                    "Deployment expired.",
+                    user.number
+                );
+
+                await updateUserStatus(
+                    user.number,
+                    "expired"
+                );
+
+                /*
+                 * Disconnect expired session.
+                 */
+                if (
+                    sessions.has(
+                        user.number
+                    )
+                ) {
+
+                    try {
+
+                        sessions
+                            .get(
+                                user.number
+                            )
+                            .socket
+                            ?.end();
+
+                    } catch {}
+
+                    sessions.delete(
+                        user.number
+                    );
+                }
+            }
+        }
+    }
+}
+
+/* =========================================================
+   EXPRESS
+========================================================= */
+
+app.use(
+    express.json({
+        limit:
+            "20mb"
+    })
+);
+
+app.use(
+    express.urlencoded({
+        extended: true,
+        limit:
+            "20mb"
+    })
+);
+
+app.use(
+    express.static(
+        PUBLIC_DIR
+    )
+);
+
+/* =========================================================
+   DASHBOARD
+========================================================= */
+
+app.get(
+    "/",
+    (req, res) => {
+
+        res.sendFile(
+            path.join(
+                PUBLIC_DIR,
+                "deploy.html"
+            )
         );
     }
 );
 
-process.on(
-    "unhandledRejection",
-    err => {
+/* =========================================================
+   HEALTH
+========================================================= */
 
-        console.error(
-            "[PROCESS] Unhandled Rejection:",
-            err
-        );
+app.get(
+    "/health",
+    (req, res) => {
+
+        res.json({
+            success:
+                true,
+
+            service:
+                "ETIAS-MINI-BOT",
+
+            sessions:
+                sessions.size,
+
+            uptime:
+                process.uptime(),
+
+            time:
+                new Date().toISOString()
+        });
     }
 );
 
-// ============================================================
-// START SERVER
-// ============================================================
+/* =========================================================
+   USERS API
+========================================================= */
+
+app.get(
+    "/api/users",
+    requireAdmin,
+    async (req, res) => {
+
+        try {
+
+            const users =
+                await getUsers();
+
+            const safe =
+                users.map(
+                    user => ({
+                        ...user,
+
+                        /*
+                         * Never return auth path
+                         * to browser.
+                         */
+                        authFolder:
+                            undefined,
+
+                        connected:
+                            sessions.has(
+                                user.number
+                            )
+                    })
+                );
+
+            res.json({
+                success:
+                    true,
+
+                users:
+                    safe
+            });
+
+        } catch (
+            error
+        ) {
+
+            res.status(
+                500
+            ).json({
+                success:
+                    false,
+
+                error:
+                    error.message
+            });
+        }
+    }
+);
+
+/* =========================================================
+   LOGS API
+========================================================= */
+
+app.get(
+    "/api/logs",
+    requireAdmin,
+    async (req, res) => {
+
+        const logs =
+            await readJSON(
+                LOG_FILE,
+                []
+            );
+
+        res.json({
+            success:
+                true,
+
+            logs:
+                logs.slice(
+                    -150
+                )
+        });
+    }
+);
+
+/* =========================================================
+   DEPLOY API
+========================================================= */
+
+app.post(
+    "/api/deploy",
+    requireAdmin,
+    async (req, res) => {
+
+        try {
+
+            const {
+                number,
+                duration,
+                code
+            } = req.body;
+
+            const user =
+                await deployUser({
+                    number,
+                    duration,
+                    code
+                });
+
+            res.json({
+                success:
+                    true,
+
+                message:
+                    "User deployed and WhatsApp connection started.",
+
+                user
+            });
+
+        } catch (
+            error
+        ) {
+
+            await log(
+                "error",
+                error.message,
+                cleanNumber(
+                    req.body?.number
+                )
+            );
+
+            res.status(
+                400
+            ).json({
+                success:
+                    false,
+
+                error:
+                    error.message
+            });
+        }
+    }
+);
+
+/* =========================================================
+   RENEW API
+========================================================= */
+
+app.post(
+    "/api/renew",
+    requireAdmin,
+    async (req, res) => {
+
+        try {
+
+            const {
+                number,
+                duration
+            } = req.body;
+
+            const user =
+                await renewUser(
+                    number,
+                    duration
+                );
+
+            res.json({
+                success:
+                    true,
+
+                user
+            });
+
+        } catch (
+            error
+        ) {
+
+            res.status(
+                400
+            ).json({
+                success:
+                    false,
+
+                error:
+                    error.message
+            });
+        }
+    }
+);
+
+/* =========================================================
+   DELETE API
+========================================================= */
+
+app.delete(
+    "/api/users/:number",
+    requireAdmin,
+    async (req, res) => {
+
+        try {
+
+            await deleteUser(
+                req.params.number
+            );
+
+            res.json({
+                success:
+                    true,
+
+                message:
+                    "User deleted."
+            });
+
+        } catch (
+            error
+        ) {
+
+            res.status(
+                400
+            ).json({
+                success:
+                    false,
+
+                error:
+                    error.message
+            });
+        }
+    }
+);
+
+/* =========================================================
+   SETTINGS API
+========================================================= */
+
+app.get(
+    "/api/settings/:number",
+    requireAdmin,
+    async (req, res) => {
+
+        const number =
+            cleanNumber(
+                req.params.number
+            );
+
+        res.json({
+            success:
+                true,
+
+            settings:
+                await getSettings(
+                    number
+                )
+        });
+    }
+);
+
+app.post(
+    "/api/settings/:number",
+    requireAdmin,
+    async (req, res) => {
+
+        try {
+
+            const number =
+                cleanNumber(
+                    req.params.number
+                );
+
+            const current =
+                await getSettings(
+                    number
+                );
+
+            await saveSettings(
+                number,
+                {
+                    ...current,
+                    ...req.body
+                }
+            );
+
+            res.json({
+                success:
+                    true,
+
+                settings:
+                    await getSettings(
+                        number
+                    )
+            });
+
+        } catch (
+            error
+        ) {
+
+            res.status(
+                400
+            ).json({
+                success:
+                    false,
+
+                error:
+                    error.message
+            });
+        }
+    }
+);
+
+/* =========================================================
+   COMMAND RELOAD
+========================================================= */
+
+app.post(
+    "/api/reload-commands",
+    requireAdmin,
+    async (req, res) => {
+
+        await loadCommands();
+
+        res.json({
+            success:
+                true,
+
+            commands:
+                commands.size
+        });
+    }
+);
+
+/* =========================================================
+   404
+========================================================= */
+
+app.use(
+    (req, res) => {
+
+        res.status(
+            404
+        ).json({
+            success:
+                false,
+
+            error:
+                "Route not found"
+        });
+    }
+);
+
+/* =========================================================
+   START
+========================================================= */
 
 async function start() {
 
-    console.log("");
-    console.log(
-        "============================================================"
-    );
+    await ensureDirectories();
+
+    await loadCommands();
+
+    /*
+     * Reconnect every saved deployment.
+     */
+    const users =
+        await getUsers();
 
     console.log(
-        `🤖 ${BOT_NAME}`
+        `[BOOT] ${users.length} saved users`
     );
 
-    console.log(
-        "🚀 Starting..."
-    );
+    for (
+        const user
+        of users
+    ) {
 
-    console.log(
-        "============================================================"
-    );
+        if (
+            user.expiresAt &&
+            Date.now() >
+                new Date(
+                    user.expiresAt
+                ).getTime()
+        ) {
 
-    await connectMongo();
+            await updateUserStatus(
+                user.number,
+                "expired"
+            );
 
-    loadCommands();
+            continue;
+        }
 
-    await loadSavedSessions();
+        try {
 
-    const server =
-        http.createServer(app);
+            await connectSession(
+                user
+            );
 
-    server.listen(
+        } catch (
+            error
+        ) {
+
+            await log(
+                "error",
+                `Startup connection failed: ${error.message}`,
+                user.number
+            );
+        }
+
+        /*
+         * Small delay between sessions.
+         */
+        await new Promise(
+            resolve =>
+                setTimeout(
+                    resolve,
+                    1500
+                )
+        );
+    }
+
+    app.listen(
         PORT,
         "0.0.0.0",
         () => {
 
             console.log(
-                `[SERVER] Running on port ${PORT}`
+                "========================================"
             );
 
             console.log(
-                `[MODE] ${BOT_MODE.toUpperCase()}`
+                "🤖 ETIAS-MINI-BOT"
             );
 
             console.log(
-                `[COMMANDS] ${commands.size} commands loaded`
+                "🚀 MULTI-SESSION SERVER ONLINE"
             );
 
             console.log(
-                `[MULTI] ${sessions.size} active sessions`
+                `🌐 Port: ${PORT}`
             );
 
             console.log(
-                `[PAIRING] ${PAIRING_SITE}`
+                `📦 Commands: ${commands.size}`
             );
 
-            console.log("");
+            console.log(
+                `👥 Sessions: ${sessions.size}`
+            );
+
+            console.log(
+                "========================================"
+            );
         }
     );
 }
 
-// ============================================================
-// START
-// ============================================================
+/* =========================================================
+   PERIODIC EXPIRY
+========================================================= */
 
-start();
+setInterval(
+    () => {
+
+        checkExpiry()
+            .catch(
+                console.error
+            );
+
+    },
+    60 * 1000
+);
+
+/* =========================================================
+   START
+========================================================= */
+
+start().catch(
+    error => {
+
+        console.error(
+            "[FATAL]",
+            error
+        );
+
+        process.exit(
+            1
+        );
+    }
+);
+
+/* =========================================================
+   SHUTDOWN
+========================================================= */
+
+async function shutdown() {
+
+    console.log(
+        "[SHUTDOWN] Closing sessions..."
+    );
+
+    for (
+        const [
+            number,
+            session
+        ]
+        of sessions.entries()
+    ) {
+
+        try {
+
+            session.socket?.end();
+
+        } catch {}
+
+        console.log(
+            `[SHUTDOWN] ${number}`
+        );
+    }
+
+    sessions.clear();
+
+    process.exit(
+        0
+    );
+}
+
+process.on(
+    "SIGINT",
+    shutdown
+);
+
+process.on(
+    "SIGTERM",
+    shutdown
+);
