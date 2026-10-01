@@ -5,79 +5,63 @@ require("dotenv").config();
 const express = require("express");
 const path = require("path");
 const fs = require("fs");
-const fsp = fs.promises;
 
 const app = express();
 
-/* =========================================================
+/* ============================================================
    CONFIG
-========================================================= */
+============================================================ */
+
+const ROOT = __dirname;
 
 const PORT = Number(process.env.PORT || 3000);
 
-const ROOT = __dirname;
-const DATA_DIR = path.join(ROOT, "data");
-const LOG_DIR = path.join(ROOT, "logs");
-
-const DEPLOYED_FILE = path.join(DATA_DIR, "deployed.json");
-const MULTI_SESSION_FILE = path.join(DATA_DIR, "multi_sessions.json");
-
-const PAIRING_SERVER_URL = (
+const PAIRING_SERVER_URL = String(
     process.env.PAIRING_SERVER_URL ||
     "https://etias-mini-bot-pair.onrender.com"
 ).replace(/\/+$/, "");
 
+const SESSION_TRANSFER_SECRET = String(
+    process.env.SESSION_TRANSFER_SECRET || ""
+).trim();
+
 const SESSION_PREFIX = "ETIAS-MINI-BOT~";
 
-const DEFAULT_DAYS = Number(process.env.DEFAULT_DAYS || 30);
-const MAX_DAYS = Number(process.env.MAX_DAYS || 365);
+const DEFAULT_DAYS = 30;
+const MAX_DAYS = 3650;
 
-/* =========================================================
-   DIRECTORIES
-========================================================= */
+const DATA_DIR = path.join(ROOT, "data");
+const AUTH_DIR = path.join(ROOT, "auth");
+const USERS_AUTH_DIR = path.join(AUTH_DIR, "users");
 
-for (const dir of [DATA_DIR, LOG_DIR]) {
-    if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-    }
+const DEPLOYED_FILE = path.join(DATA_DIR, "deployed.json");
+
+for (const dir of [
+    DATA_DIR,
+    AUTH_DIR,
+    USERS_AUTH_DIR
+]) {
+    fs.mkdirSync(dir, { recursive: true });
 }
 
-/* =========================================================
+/* ============================================================
    EXPRESS
-========================================================= */
+============================================================ */
 
-app.disable("x-powered-by");
-
-app.use(express.json({ limit: "2mb" }));
-app.use(express.urlencoded({ extended: true, limit: "2mb" }));
+app.use(express.json({ limit: "20mb" }));
+app.use(express.urlencoded({
+    extended: true,
+    limit: "20mb"
+}));
 
 app.use((req, res, next) => {
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader(
-        "Access-Control-Allow-Methods",
-        "GET,POST,PUT,PATCH,DELETE,OPTIONS"
-    );
-    res.setHeader(
-        "Access-Control-Allow-Headers",
-        "Content-Type, Authorization, X-API-Key"
-    );
-
-    if (req.method === "OPTIONS") {
-        return res.sendStatus(204);
-    }
-
+    res.setHeader("X-Powered-By", "ETIAS-MINI-BOT");
     next();
 });
 
-/* =========================================================
+/* ============================================================
    HELPERS
-========================================================= */
-
-function normalizePhone(value) {
-    return String(value || "")
-        .replace(/[^\d]/g, "")
-        .replace(/^0+/, "");
-}
+============================================================ */
 
 function normalizeSessionId(value) {
     return String(value || "").trim().toUpperCase();
@@ -85,171 +69,237 @@ function normalizeSessionId(value) {
 
 function isValidSessionId(sessionId) {
     return new RegExp(
-        "^" +
-            SESSION_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") +
-            "\\d{8}$",
-        "i"
-    ).test(String(sessionId || "").trim());
+        `^${SESSION_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\d{8}$`
+    ).test(normalizeSessionId(sessionId));
 }
 
-function safeDays(value) {
-    const days = Number(value);
+function normalizePhone(phone) {
+    return String(phone || "")
+        .replace(/[^\d]/g, "")
+        .replace(/^00/, "");
+}
 
-    if (!Number.isFinite(days)) {
-        return DEFAULT_DAYS;
+function authFolderName(sessionId) {
+    const id = normalizeSessionId(sessionId);
+
+    if (!isValidSessionId(id)) {
+        throw new Error("Invalid Session ID");
     }
 
-    return Math.max(1, Math.min(Math.floor(days), MAX_DAYS));
+    return id.replace(/[^A-Z0-9_-]/gi, "_");
 }
 
-function now() {
-    return new Date().toISOString();
+function getAuthFolder(sessionId) {
+    return path.join(
+        USERS_AUTH_DIR,
+        authFolderName(sessionId)
+    );
 }
 
-function getExpireDate(days) {
-    return new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+function ensureAuthFolder(sessionId) {
+    const folder = getAuthFolder(sessionId);
+    fs.mkdirSync(folder, { recursive: true });
+    return folder;
 }
 
-async function ensureJsonFile(file, fallback) {
+function readJSON(file, fallback) {
     try {
-        await fsp.access(file);
-    } catch {
-        await fsp.writeFile(
-            file,
-            JSON.stringify(fallback, null, 2),
-            "utf8"
-        );
-    }
-}
-
-async function readJson(file, fallback = []) {
-    try {
-        const raw = await fsp.readFile(file, "utf8");
-
-        if (!raw.trim()) {
+        if (!fs.existsSync(file)) {
             return fallback;
         }
 
-        return JSON.parse(raw);
+        return JSON.parse(
+            fs.readFileSync(file, "utf8")
+        );
     } catch {
         return fallback;
     }
 }
 
-async function writeJson(file, data) {
-    const temp = `${file}.tmp`;
+function writeJSON(file, data) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
 
-    await fsp.writeFile(
-        temp,
+    fs.writeFileSync(
+        file,
         JSON.stringify(data, null, 2),
         "utf8"
     );
-
-    await fsp.rename(temp, file);
 }
 
-async function appendLog(message, meta = null) {
-    const line =
-        `[${now()}] ${message}` +
-        (meta ? ` ${JSON.stringify(meta)}` : "") +
-        "\n";
+function getDeployments() {
+    const data = readJSON(DEPLOYED_FILE, []);
 
-    try {
-        await fsp.appendFile(
-            path.join(LOG_DIR, "server.log"),
-            line,
-            "utf8"
-        );
-    } catch {
-        // Logging must never crash the API.
+    return Array.isArray(data) ? data : [];
+}
+
+function saveDeployments(data) {
+    writeJSON(DEPLOYED_FILE, data);
+}
+
+function findDeployment(sessionId) {
+    const id = normalizeSessionId(sessionId);
+
+    return getDeployments().find(
+        item =>
+            normalizeSessionId(item.sessionId) === id
+    );
+}
+
+function updateDeployment(sessionId, patch) {
+    const deployments = getDeployments();
+
+    const index = deployments.findIndex(
+        item =>
+            normalizeSessionId(item.sessionId) ===
+            normalizeSessionId(sessionId)
+    );
+
+    if (index === -1) {
+        return null;
     }
+
+    deployments[index] = {
+        ...deployments[index],
+        ...patch,
+        updatedAt: new Date().toISOString()
+    };
+
+    saveDeployments(deployments);
+
+    return deployments[index];
 }
 
-function jsonError(res, status, message, extra = {}) {
-    return res.status(status).json({
-        success: false,
-        error: message,
-        ...extra
-    });
+/* ============================================================
+   SAFE AUTH FILE HANDLING
+============================================================ */
+
+function safeAuthRelativePath(filePath) {
+    let relative = String(filePath || "")
+        .replace(/\\/g, "/")
+        .replace(/^\/+/, "");
+
+    if (!relative) {
+        throw new Error("Invalid auth file path");
+    }
+
+    if (
+        relative.includes("\0") ||
+        relative.split("/").includes("..")
+    ) {
+        throw new Error("Unsafe auth file path");
+    }
+
+    if (path.isAbsolute(relative)) {
+        throw new Error("Absolute auth paths are not allowed");
+    }
+
+    return relative;
 }
 
-function manager() {
-    return global.ETIAS_BOT_MANAGER || null;
+function writeTransferredAuth(sessionId, files) {
+    if (!Array.isArray(files) || files.length === 0) {
+        throw new Error("Pairing server returned no auth files");
+    }
+
+    const authFolder = ensureAuthFolder(sessionId);
+
+    let credsFound = false;
+
+    for (const file of files) {
+        if (!file || !file.path) {
+            continue;
+        }
+
+        const relative = safeAuthRelativePath(file.path);
+
+        const destination = path.resolve(
+            authFolder,
+            relative
+        );
+
+        const rootResolved = path.resolve(authFolder);
+
+        if (
+            destination !== rootResolved &&
+            !destination.startsWith(rootResolved + path.sep)
+        ) {
+            throw new Error("Auth path escaped session folder");
+        }
+
+        if (relative === "creds.json") {
+            credsFound = true;
+        }
+
+        if (typeof file.data !== "string") {
+            throw new Error(
+                `Invalid data for auth file: ${relative}`
+            );
+        }
+
+        const buffer = Buffer.from(file.data, "base64");
+
+        fs.mkdirSync(
+            path.dirname(destination),
+            { recursive: true }
+        );
+
+        fs.writeFileSync(
+            destination,
+            buffer
+        );
+    }
+
+    const credsPath = path.join(
+        authFolder,
+        "creds.json"
+    );
+
+    if (!credsFound && !fs.existsSync(credsPath)) {
+        throw new Error(
+            "Transferred authentication does not contain creds.json"
+        );
+    }
+
+    if (!fs.existsSync(credsPath)) {
+        throw new Error("creds.json was not created");
+    }
+
+    return authFolder;
 }
 
-/* =========================================================
-   INITIAL DATA
-========================================================= */
-
-ensureJsonFile(DEPLOYED_FILE, []).catch(() => {});
-ensureJsonFile(MULTI_SESSION_FILE, []).catch(() => {});
-
-/* =========================================================
-   BASIC ROUTES
-========================================================= */
-
-app.get("/", async (req, res) => {
-    res.json({
-        success: true,
-        name: "ETIAS-MINI-BOT Deployment Server",
-        status: "online",
-        version: "3.0.0",
-        service: "bot",
-        pairingServer: PAIRING_SERVER_URL,
-        pairingHandledBy: "ETIAS pairing server",
-        pairingCodeGeneration: false,
-        sessionPrefix: SESSION_PREFIX,
-        time: now()
-    });
-});
-
-app.get("/health", async (req, res) => {
-    const botManager = manager();
-
-    res.json({
-        success: true,
-        status: "online",
-        service: "deployment-server",
-        botManager: !!botManager,
-        pairingServer: PAIRING_SERVER_URL,
-        time: now()
-    });
-});
-
-app.get("/api/health", async (req, res) => {
-    const botManager = manager();
-
-    res.json({
-        success: true,
-        status: "online",
-        botManager: !!botManager,
-        time: now()
-    });
-});
-
-/* =========================================================
+/* ============================================================
    PAIRING SERVER REQUEST
-========================================================= */
+============================================================ */
 
 async function callPairingServer(endpoint, options = {}) {
     const url =
         `${PAIRING_SERVER_URL}${endpoint.startsWith("/") ? endpoint : "/" + endpoint}`;
 
+    const headers = {
+        Accept: "application/json",
+        ...(options.headers || {})
+    };
+
+    if (options.body !== undefined) {
+        headers["Content-Type"] = "application/json";
+    }
+
     const controller = new AbortController();
 
-    const timeout = setTimeout(() => {
-        controller.abort();
-    }, 20000);
+    const timeout = setTimeout(
+        () => controller.abort(),
+        Number(options.timeout || 30000)
+    );
 
     try {
         const response = await fetch(url, {
-            ...options,
-            signal: controller.signal,
-            headers: {
-                Accept: "application/json",
-                "Content-Type": "application/json",
-                ...(options.headers || {})
-            }
+            method: options.method || "GET",
+            headers,
+            body:
+                options.body !== undefined
+                    ? JSON.stringify(options.body)
+                    : undefined,
+            signal: controller.signal
         });
 
         const text = await response.text();
@@ -257,11 +307,11 @@ async function callPairingServer(endpoint, options = {}) {
         let data;
 
         try {
-            data = text ? JSON.parse(text) : {};
+            data = JSON.parse(text);
         } catch {
             data = {
                 success: false,
-                error: text || "Invalid response from pairing server"
+                error: text || `HTTP ${response.status}`
             };
         }
 
@@ -275,228 +325,672 @@ async function callPairingServer(endpoint, options = {}) {
     }
 }
 
-/* =========================================================
+/* ============================================================
    SESSION VERIFICATION
-========================================================= */
+============================================================ */
 
-async function verifySessionWithPairingServer(sessionId, phone) {
-    const encoded = encodeURIComponent(sessionId);
+async function verifySessionWithPairingServer(
+    sessionId,
+    phone
+) {
+    const id = normalizeSessionId(sessionId);
+    const normalizedPhone = normalizePhone(phone);
 
-    /*
-     * Preferred endpoint.
-     *
-     * The pairing server should expose:
-     *
-     * GET /session/:sessionId
-     *
-     * or:
-     *
-     * GET /session-status/:sessionId
-     */
+    if (!isValidSessionId(id)) {
+        return {
+            success: false,
+            error: "Invalid Session ID format"
+        };
+    }
+
+    const encoded = encodeURIComponent(id);
 
     const endpoints = [
         `/session/${encoded}`,
         `/session-status/${encoded}`,
-        `/check-session/${encoded}`
+        `/check-session/${encoded}`,
+        `/check/${encoded}`
     ];
 
-    let lastResult = null;
+    let lastError = "Session not found";
 
     for (const endpoint of endpoints) {
         try {
             const result = await callPairingServer(endpoint);
 
-            lastResult = result;
-
-            if (result.status === 404) {
-                continue;
-            }
-
             if (!result.ok) {
+                lastError =
+                    result.data?.error ||
+                    `Pairing server returned HTTP ${result.status}`;
+
                 continue;
             }
 
             const data = result.data || {};
 
-            const record =
-                data.session ||
-                data.data ||
-                data.result ||
-                data;
+            if (data.success === false) {
+                lastError =
+                    data.error ||
+                    "Session verification failed";
 
-            const storedPhone = normalizePhone(
-                record.phone ||
-                record.number ||
-                record.msisdn ||
-                record.jid ||
+                continue;
+            }
+
+            const returnedSessionId = normalizeSessionId(
+                data.sessionId ||
+                data.session?.sessionId ||
+                data.record?.sessionId ||
+                id
+            );
+
+            if (
+                returnedSessionId &&
+                returnedSessionId !== id
+            ) {
+                lastError =
+                    "Pairing server returned a different Session ID";
+
+                continue;
+            }
+
+            const returnedPhone = normalizePhone(
+                data.phone ||
+                data.number ||
+                data.session?.phone ||
+                data.session?.number ||
+                data.record?.phone ||
+                data.record?.number ||
                 ""
             );
 
-            const requestedPhone = normalizePhone(phone);
-
             if (
-                storedPhone &&
-                requestedPhone &&
-                !storedPhone.endsWith(requestedPhone) &&
-                !requestedPhone.endsWith(storedPhone)
+                returnedPhone &&
+                normalizedPhone &&
+                returnedPhone !== normalizedPhone
             ) {
                 return {
-                    valid: false,
-                    error: "Session ID does not belong to this phone number."
+                    success: false,
+                    error:
+                        "Session ID does not belong to the supplied WhatsApp number"
                 };
             }
 
             return {
-                valid:
-                    data.valid !== false &&
-                    data.success !== false &&
-                    data.error === undefined,
-                data
+                success: true,
+                sessionId: id,
+                phone: returnedPhone || normalizedPhone,
+                jid:
+                    data.jid ||
+                    data.session?.jid ||
+                    data.record?.jid ||
+                    null,
+                pairingId:
+                    data.pairingId ||
+                    data.pairId ||
+                    data.session?.pairingId ||
+                    data.record?.pairingId ||
+                    null,
+                authFolder:
+                    data.authFolder ||
+                    data.session?.authFolder ||
+                    data.record?.authFolder ||
+                    null,
+                status:
+                    data.status ||
+                    data.session?.status ||
+                    "authenticated",
+                raw: data
             };
         } catch (error) {
-            lastResult = {
-                error: error.message
-            };
+            lastError = error.message;
         }
     }
 
     return {
-        valid: false,
-        unavailable: true,
-        error:
-            "Could not verify the Session ID with the pairing server.",
-        details: lastResult
+        success: false,
+        error: lastError
     };
 }
 
-/* =========================================================
-   DEPLOYMENT RECORDS
-========================================================= */
+/* ============================================================
+   AUTH TRANSFER
+============================================================ */
 
-async function getDeployments() {
-    return await readJson(DEPLOYED_FILE, []);
-}
+async function transferAuthFromPairingServer(
+    sessionId,
+    phone
+) {
+    if (!SESSION_TRANSFER_SECRET) {
+        throw new Error(
+            "SESSION_TRANSFER_SECRET is not configured on the bot server"
+        );
+    }
 
-async function saveDeployments(records) {
-    await writeJson(DEPLOYED_FILE, records);
-}
+    const id = normalizeSessionId(sessionId);
 
-async function findDeployment(sessionId) {
-    const records = await getDeployments();
+    const encoded = encodeURIComponent(id);
 
-    return records.find(
-        item =>
-            normalizeSessionId(item.sessionId) ===
-            normalizeSessionId(sessionId)
+    const result = await callPairingServer(
+        `/session/${encoded}/auth`,
+        {
+            timeout: 60000,
+            headers: {
+                "X-Session-Transfer-Secret":
+                    SESSION_TRANSFER_SECRET
+            }
+        }
     );
+
+    if (!result.ok) {
+        throw new Error(
+            result.data?.error ||
+            `Auth transfer failed with HTTP ${result.status}`
+        );
+    }
+
+    const data = result.data || {};
+
+    if (data.success !== true) {
+        throw new Error(
+            data.error ||
+            "Pairing server rejected auth transfer"
+        );
+    }
+
+    const returnedSessionId = normalizeSessionId(
+        data.sessionId || id
+    );
+
+    if (returnedSessionId !== id) {
+        throw new Error(
+            "Auth transfer Session ID mismatch"
+        );
+    }
+
+    const returnedPhone = normalizePhone(
+        data.phone ||
+        data.number ||
+        phone
+    );
+
+    if (
+        phone &&
+        returnedPhone &&
+        returnedPhone !== normalizePhone(phone)
+    ) {
+        throw new Error(
+            "Auth transfer WhatsApp number mismatch"
+        );
+    }
+
+    const authFolder = writeTransferredAuth(
+        id,
+        data.files
+    );
+
+    return {
+        success: true,
+        sessionId: id,
+        phone: returnedPhone,
+        jid: data.jid || null,
+        pairingId:
+            data.pairingId ||
+            data.pairId ||
+            null,
+        authFolder,
+        filesTransferred: data.files.length
+    };
 }
 
-async function findActivePhone(phone) {
-    const normalized = normalizePhone(phone);
-
-    const records = await getDeployments();
-
-    return records.find(item => {
-        if (normalizePhone(item.phone) !== normalized) {
-            return false;
-        }
-
-        if (item.status === "expired") {
-            return false;
-        }
-
-        if (!item.expireAt) {
-            return true;
-        }
-
-        return new Date(item.expireAt).getTime() > Date.now();
-    });
-}
-
-/* =========================================================
-   DEPLOY THROUGH MAIN.JS MANAGER
-========================================================= */
+/* ============================================================
+   BOT MANAGER
+============================================================ */
 
 async function deployThroughManager(options) {
-    const botManager = manager();
+    const botManager = global.ETIAS_BOT_MANAGER;
 
-    if (!botManager) {
+    if (
+        !botManager ||
+        typeof botManager.deploySession !== "function"
+    ) {
         throw new Error(
-            "ETIAS_BOT_MANAGER is not initialized yet."
+            "ETIAS_BOT_MANAGER is not available"
         );
     }
 
-    if (typeof botManager.deploySession !== "function") {
-        throw new Error(
-            "deploySession() is not available in ETIAS_BOT_MANAGER."
-        );
-    }
+    const auth = await transferAuthFromPairingServer(
+        options.sessionId,
+        options.phone
+    );
 
-    return await botManager.deploySession(options);
-}
+    const result = await botManager.deploySession({
+        ...options,
 
-/* =========================================================
-   POST /DEPLOY
-========================================================= */
+        authFolder: auth.authFolder,
 
-app.post("/deploy", async (req, res) => {
-    const sessionId = normalizeSessionId(req.body.sessionId);
-    const phone = normalizePhone(req.body.phone);
-    const days = safeDays(req.body.days);
+        authenticated: true,
 
-    await appendLog("Deployment request received", {
-        sessionId,
-        phone,
-        days
+        connectImmediately: true,
+
+        startCommands: true,
+
+        jid: options.jid || auth.jid || null
     });
 
-    if (!isValidSessionId(sessionId)) {
-        return jsonError(
-            res,
-            400,
-            "Invalid Session ID. Expected ETIAS-MINI-BOT~12345678."
+    if (!result || result.success !== true) {
+        throw new Error(
+            result?.error ||
+            "Bot manager failed to deploy session"
         );
     }
 
-    if (!phone || phone.length < 7) {
-        return jsonError(
-            res,
-            400,
-            "A valid WhatsApp phone number is required."
-        );
-    }
+    return {
+        ...result,
+
+        success: true,
+
+        authTransferred: true,
+
+        authFolder: auth.authFolder,
+
+        filesTransferred:
+            auth.filesTransferred,
+
+        jid:
+            result.jid ||
+            auth.jid ||
+            options.jid ||
+            null
+    };
+}
+
+/* ============================================================
+   DEPLOYMENT DASHBOARD
+============================================================ */
+
+const DEPLOYMENT_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+
+<title>ETIAS-MINI-BOT Deployment</title>
+
+<style>
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    min-height: 100vh;
+    background:
+        radial-gradient(circle at top, #063b27 0%, #01150e 35%, #000 100%);
+    color: #d7ffe9;
+    font-family: Arial, sans-serif;
+}
+
+body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background-image:
+        linear-gradient(rgba(0,255,140,.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,255,140,.04) 1px, transparent 1px);
+    background-size: 35px 35px;
+}
+
+.container {
+    width: min(500px, 92%);
+    margin: 60px auto;
+    padding: 30px;
+    border: 1px solid #00ff88;
+    border-radius: 20px;
+    background: rgba(0,20,13,.86);
+    box-shadow:
+        0 0 30px rgba(0,255,136,.18),
+        inset 0 0 30px rgba(0,255,136,.03);
+}
+
+h1 {
+    text-align: center;
+    color: #00ff88;
+    letter-spacing: 2px;
+}
+
+.subtitle {
+    text-align: center;
+    color: #7deeb1;
+    margin-bottom: 25px;
+}
+
+label {
+    display: block;
+    margin: 15px 0 7px;
+}
+
+input,
+select {
+    width: 100%;
+    padding: 14px;
+    border-radius: 10px;
+    border: 1px solid #00a95c;
+    background: #001a10;
+    color: white;
+    outline: none;
+}
+
+button {
+    width: 100%;
+    margin-top: 22px;
+    padding: 15px;
+    border: 0;
+    border-radius: 10px;
+    background: #00ff88;
+    color: #00150c;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+button:hover {
+    box-shadow: 0 0 20px #00ff88;
+}
+
+#result {
+    margin-top: 20px;
+    padding: 15px;
+    border-radius: 10px;
+    background: #001a10;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.success {
+    color: #00ff88;
+}
+
+.error {
+    color: #ff6868;
+}
+</style>
+</head>
+
+<body>
+
+<div class="container">
+
+<h1>ETIAS-MINI-BOT</h1>
+
+<div class="subtitle">
+Multi-User Deployment System
+</div>
+
+<form id="deployForm">
+
+<label>Admin Key</label>
+<input
+    id="adminKey"
+    type="password"
+    placeholder="Admin key"
+    required
+>
+
+<label>Session ID</label>
+<input
+    id="sessionId"
+    placeholder="ETIAS-MINI-BOT~12345678"
+    required
+>
+
+<label>WhatsApp Number</label>
+<input
+    id="phone"
+    placeholder="263778810589"
+    required
+>
+
+<label>Duration</label>
+
+<select id="days">
+
+<option value="30">30 Days</option>
+<option value="60">60 Days</option>
+<option value="90">90 Days</option>
+<option value="180">180 Days</option>
+<option value="365">365 Days</option>
+
+</select>
+
+<button type="submit">
+DEPLOY BOT
+</button>
+
+</form>
+
+<div id="result">
+Waiting for deployment...
+</div>
+
+</div>
+
+<script>
+
+const form = document.getElementById("deployForm");
+const result = document.getElementById("result");
+
+form.addEventListener("submit", async (event) => {
+
+    event.preventDefault();
+
+    result.className = "";
+    result.textContent = "Deploying...";
+
+    const payload = {
+        adminKey:
+            document.getElementById("adminKey").value,
+
+        sessionId:
+            document.getElementById("sessionId").value,
+
+        phone:
+            document.getElementById("phone").value,
+
+        days:
+            Number(document.getElementById("days").value)
+    };
 
     try {
-        const existing = await findDeployment(sessionId);
 
-        if (existing && existing.status === "deployed") {
-            return jsonError(
-                res,
-                409,
-                "This Session ID has already been deployed.",
-                {
-                    deployment: existing
-                }
-            );
+        const response = await fetch("/deploy", {
+
+            method: "POST",
+
+            headers: {
+                "Content-Type": "application/json"
+            },
+
+            body: JSON.stringify(payload)
+        });
+
+        const data = await response.json();
+
+        if (!response.ok || !data.success) {
+
+            result.className = "error";
+
+            result.textContent =
+                data.error ||
+                "Deployment failed.";
+
+            return;
         }
 
-        const activePhone = await findActivePhone(phone);
+        result.className = "success";
+
+        result.textContent =
+            "BOT DEPLOYED SUCCESSFULLY\\n\\n" +
+            "Session: " +
+            data.sessionId +
+            "\\nPhone: " +
+            data.phone +
+            "\\nStatus: " +
+            data.status +
+            "\\nConnected: " +
+            data.connected +
+            "\\nDays: " +
+            data.days;
+
+    } catch (error) {
+
+        result.className = "error";
+
+        result.textContent =
+            error.message;
+    }
+
+});
+
+</script>
+
+</body>
+</html>`;
+
+/* ============================================================
+   ROOT
+============================================================ */
+
+app.get("/", (req, res) => {
+    res.type("html").send(DEPLOYMENT_HTML);
+});
+
+/* ============================================================
+   HEALTH
+============================================================ */
+
+app.get("/health", (req, res) => {
+
+    res.json({
+        success: true,
+        status: "online",
+        service: "ETIAS-MINI-BOT Deployment Server",
+        version: "5.0.0",
+        multiUser: true,
+        pairingServer: PAIRING_SERVER_URL,
+        sessionPrefix: SESSION_PREFIX,
+        authTransfer:
+            Boolean(SESSION_TRANSFER_SECRET),
+        time: new Date().toISOString()
+    });
+
+});
+
+app.get("/api/health", (req, res) => {
+    res.json({
+        success: true,
+        status: "online"
+    });
+});
+
+/* ============================================================
+   DEPLOY
+============================================================ */
+
+app.post("/deploy", async (req, res) => {
+
+    try {
+
+        const sessionId =
+            normalizeSessionId(req.body.sessionId);
+
+        const phone =
+            normalizePhone(req.body.phone);
+
+        const days =
+            Math.min(
+                Math.max(
+                    Number(req.body.days || DEFAULT_DAYS),
+                    1
+                ),
+                MAX_DAYS
+            );
+
+        const adminKey =
+            String(req.body.adminKey || "").trim();
 
         if (
-            activePhone &&
-            normalizeSessionId(activePhone.sessionId) !== sessionId
+            process.env.ADMIN_SECRET &&
+            adminKey !== process.env.ADMIN_SECRET
         ) {
-            return jsonError(
-                res,
-                409,
-                "This phone number already has an active deployment."
-            );
+            return res.status(403).json({
+                success: false,
+                error: "Invalid admin key"
+            });
         }
 
-        /*
-         * Ask the pairing service to validate that the
-         * Session ID actually exists.
-         */
+        if (!isValidSessionId(sessionId)) {
+
+            return res.status(400).json({
+                success: false,
+                error:
+                    `Invalid Session ID. Expected ${SESSION_PREFIX} followed by 8 digits.`
+            });
+
+        }
+
+        if (!phone || phone.length < 7) {
+
+            return res.status(400).json({
+                success: false,
+                error: "Invalid WhatsApp number"
+            });
+
+        }
+
+        const existing =
+            findDeployment(sessionId);
+
+        if (
+            existing &&
+            ["starting", "connected", "active"].includes(
+                String(existing.status).toLowerCase()
+            )
+        ) {
+
+            return res.status(409).json({
+                success: false,
+                error:
+                    "This Session ID is already deployed"
+            });
+
+        }
+
+        const deployments =
+            getDeployments();
+
+        const samePhone =
+            deployments.find(item =>
+                normalizePhone(item.phone) === phone &&
+                ["starting", "connected", "active"].includes(
+                    String(item.status).toLowerCase()
+                )
+            );
+
+        if (samePhone) {
+
+            return res.status(409).json({
+                success: false,
+                error:
+                    "This WhatsApp number already has an active deployment",
+                sessionId:
+                    samePhone.sessionId
+            });
+
+        }
+
+        /* ----------------------------------------------------
+           STEP 1: VERIFY SESSION
+        ---------------------------------------------------- */
 
         const verification =
             await verifySessionWithPairingServer(
@@ -504,483 +998,618 @@ app.post("/deploy", async (req, res) => {
                 phone
             );
 
-        if (!verification.valid) {
-            await appendLog(
-                "Session verification failed",
-                {
-                    sessionId,
-                    phone,
-                    error: verification.error
-                }
-            );
+        if (!verification.success) {
 
-            return jsonError(
-                res,
-                verification.unavailable ? 503 : 400,
-                verification.error ||
-                    "Session ID could not be verified."
-            );
+            return res.status(400).json({
+                success: false,
+                error:
+                    verification.error ||
+                    "Could not verify the Session ID with the pairing server."
+            });
+
         }
 
-        const expireAt = getExpireDate(days);
+        /* ----------------------------------------------------
+           STEP 2: DEPLOY + TRANSFER AUTH
+        ---------------------------------------------------- */
 
-        /*
-         * Important:
-         *
-         * main.js handles the actual Baileys session.
-         * This server does NOT generate a pairing code.
-         */
+        const expireAt =
+            new Date(
+                Date.now() +
+                days * 24 * 60 * 60 * 1000
+            ).toISOString();
 
-        const result = await deployThroughManager({
+        const managerResult =
+            await deployThroughManager({
+
+                sessionId,
+
+                phone,
+
+                days,
+
+                expireAt,
+
+                pairingId:
+                    verification.pairingId,
+
+                jid:
+                    verification.jid,
+
+                authenticated: true,
+
+                connectImmediately: true,
+
+                startCommands: true
+
+            });
+
+        /* ----------------------------------------------------
+           STEP 3: SAVE DEPLOYMENT
+        ---------------------------------------------------- */
+
+        const deployment = {
+
             sessionId,
-            phone,
-            days,
-            expireAt: expireAt.toISOString(),
-            pairingServer: PAIRING_SERVER_URL,
 
-            /*
-             * Let main.js resolve the persisted auth state.
-             */
-            authFolder:
-                verification.data?.authFolder ||
-                verification.data?.session?.authFolder ||
+            phone,
+
+            jid:
+                managerResult.jid ||
+                verification.jid ||
                 null,
 
             pairingId:
-                verification.data?.pairingId ||
-                verification.data?.session?.pairingId ||
-                null
-        });
+                managerResult.pairingId ||
+                verification.pairingId ||
+                null,
 
-        const records = await getDeployments();
-
-        const deployment = {
-            sessionId,
-            phone,
             days,
-            expireAt: expireAt.toISOString(),
 
-            status: "deployed",
-            connected: false,
+            expireAt,
 
-            pairingServer: PAIRING_SERVER_URL,
+            authFolder:
+                managerResult.authFolder,
 
-            createdAt: now(),
-            lastSeen: now(),
+            status:
+                managerResult.status ||
+                "starting",
 
-            result:
-                result && typeof result === "object"
-                    ? result
-                    : null
+            connected:
+                managerResult.connected === true,
+
+            authTransferred:
+                managerResult.authTransferred === true,
+
+            filesTransferred:
+                managerResult.filesTransferred || 0,
+
+            commandsStarted:
+                managerResult.commandsStarted !== false,
+
+            createdAt:
+                new Date().toISOString(),
+
+            botStartedAt:
+                new Date().toISOString(),
+
+            updatedAt:
+                new Date().toISOString()
         };
 
-        const index = records.findIndex(
-            item =>
-                normalizeSessionId(item.sessionId) ===
-                sessionId
-        );
+        const updated =
+            getDeployments().filter(
+                item =>
+                    normalizeSessionId(item.sessionId) !==
+                    sessionId
+            );
 
-        if (index >= 0) {
-            records[index] = {
-                ...records[index],
-                ...deployment
-            };
-        } else {
-            records.push(deployment);
-        }
+        updated.push(deployment);
 
-        await saveDeployments(records);
-
-        await appendLog(
-            "Deployment successful",
-            deployment
-        );
+        saveDeployments(updated);
 
         return res.json({
+
             success: true,
-            message: "ETIAS-MINI-BOT deployed successfully.",
-            deployment
+
+            message:
+                "ETIAS-MINI-BOT deployed successfully",
+
+            sessionId,
+
+            phone,
+
+            jid:
+                deployment.jid,
+
+            days,
+
+            expireAt,
+
+            status:
+                deployment.status,
+
+            connected:
+                deployment.connected,
+
+            authTransferred:
+                deployment.authTransferred,
+
+            filesTransferred:
+                deployment.filesTransferred,
+
+            commandsStarted:
+                deployment.commandsStarted
+
         });
+
     } catch (error) {
-        await appendLog(
-            "Deployment failed",
-            {
-                sessionId,
-                phone,
-                error: error.message,
-                stack: error.stack
-            }
-        );
 
         console.error(
             "[DEPLOY ERROR]",
             error
         );
 
-        return jsonError(
-            res,
-            500,
-            error.message ||
-                "Failed to deploy bot session."
-        );
+        return res.status(500).json({
+
+            success: false,
+
+            error:
+                error.message ||
+                "Deployment failed"
+
+        });
+
     }
+
 });
 
-/* =========================================================
-   GET /DEPLOY
-   Compatibility/status endpoint
-========================================================= */
-
-app.get("/deploy", async (req, res) => {
-    res.json({
-        success: false,
-        message:
-            "Use POST /deploy with sessionId, phone and days.",
-        example: {
-            sessionId: "ETIAS-MINI-BOT~12345678",
-            phone: "263771234567",
-            days: 30
-        }
-    });
-});
-
-/* =========================================================
+/* ============================================================
    SESSION STATUS
-========================================================= */
+============================================================ */
 
 app.get("/status/:sessionId", async (req, res) => {
-    const sessionId = normalizeSessionId(
-        req.params.sessionId
-    );
 
-    if (!isValidSessionId(sessionId)) {
-        return jsonError(
-            res,
-            400,
-            "Invalid Session ID."
+    const sessionId =
+        normalizeSessionId(
+            req.params.sessionId
         );
-    }
 
-    const deployment =
-        await findDeployment(sessionId);
+    const local =
+        findDeployment(sessionId);
 
-    const botManager = manager();
+    const manager =
+        global.ETIAS_BOT_MANAGER;
 
-    let managerStatus = null;
+    let live = null;
 
-    try {
-        if (
-            botManager &&
-            typeof botManager.getSessionStatus ===
-                "function"
-        ) {
-            managerStatus =
-                await botManager.getSessionStatus(
+    if (
+        manager &&
+        typeof manager.getSession === "function"
+    ) {
+        try {
+            live =
+                manager.getSession(
                     sessionId
                 );
-        }
-    } catch (error) {
-        managerStatus = {
-            error: error.message
-        };
+        } catch {}
     }
 
-    return res.json({
-        success: true,
-        sessionId,
-        deployment: deployment || null,
-        manager: managerStatus,
-        time: now()
-    });
-});
+    if (!local && !live) {
 
-/* =========================================================
-   SESSION LOOKUP
-========================================================= */
+        return res.status(404).json({
+            success: false,
+            error: "Session not found"
+        });
+
+    }
+
+    res.json({
+
+        success: true,
+
+        sessionId,
+
+        deployment:
+            local || null,
+
+        live:
+            live || null
+
+    });
+
+});
 
 app.get("/api/session/:sessionId", async (req, res) => {
-    const sessionId = normalizeSessionId(
-        req.params.sessionId
-    );
 
-    if (!isValidSessionId(sessionId)) {
-        return jsonError(
-            res,
-            400,
-            "Invalid Session ID."
-        );
-    }
+    req.url =
+        `/status/${req.params.sessionId}`;
 
-    const deployment =
-        await findDeployment(sessionId);
-
-    return res.json({
-        success: true,
-        sessionId,
-        deployment: deployment || null
-    });
-});
-
-/* =========================================================
-   ALL DEPLOYED SESSIONS
-========================================================= */
-
-app.get("/sessions", async (req, res) => {
-    const records = await getDeployments();
-
-    const safe = records.map(item => ({
-        sessionId: item.sessionId,
-        phone: item.phone,
-        days: item.days,
-        status: item.status,
-        connected: item.connected,
-        expireAt: item.expireAt,
-        createdAt: item.createdAt,
-        lastSeen: item.lastSeen
-    }));
-
-    res.json({
-        success: true,
-        total: safe.length,
-        sessions: safe
-    });
-});
-
-app.get("/api/sessions", async (req, res) => {
-    const records = await getDeployments();
-
-    res.json({
-        success: true,
-        total: records.length,
-        sessions: records
-    });
-});
-
-/* =========================================================
-   DEPLOYMENT STATS
-========================================================= */
-
-app.get("/deploy-stats", async (req, res) => {
-    const records = await getDeployments();
-
-    const active = records.filter(
-        item =>
-            item.status !== "expired" &&
-            (!item.expireAt ||
-                new Date(item.expireAt).getTime() >
-                    Date.now())
-    );
-
-    const connected = records.filter(
-        item => item.connected === true
-    );
-
-    const expired = records.filter(
-        item =>
-            item.status === "expired" ||
-            (item.expireAt &&
-                new Date(item.expireAt).getTime() <=
-                    Date.now())
-    );
-
-    res.json({
-        success: true,
-        total: records.length,
-        active: active.length,
-        connected: connected.length,
-        expired: expired.length,
-        time: now()
-    });
-});
-
-/* =========================================================
-   TOTAL USERS
-========================================================= */
-
-app.get("/total-users", async (req, res) => {
-    const records = await getDeployments();
-
-    const uniquePhones =
-        new Set(
-            records
-                .map(item => normalizePhone(item.phone))
-                .filter(Boolean)
-        );
-
-    res.json({
-        success: true,
-        totalUsers: uniquePhones.size
-    });
-});
-
-/* =========================================================
-   LOGS
-========================================================= */
-
-app.get("/logs", async (req, res) => {
-    const file =
-        path.join(LOG_DIR, "server.log");
-
-    try {
-        const content =
-            await fsp.readFile(file, "utf8");
-
-        const lines =
-            content
-                .split("\n")
-                .filter(Boolean)
-                .slice(-200);
-
-        res.json({
-            success: true,
-            total: lines.length,
-            logs: lines
-        });
-    } catch {
-        res.json({
-            success: true,
-            total: 0,
-            logs: []
-        });
-    }
-});
-
-/* =========================================================
-   BOT MANAGER STATUS
-========================================================= */
-
-app.get("/manager", async (req, res) => {
-    const botManager = manager();
-
-    if (!botManager) {
-        return res.status(503).json({
-            success: false,
-            manager: false,
-            message:
-                "ETIAS_BOT_MANAGER has not initialized."
-        });
-    }
-
-    res.json({
-        success: true,
-        manager: true,
-        methods: Object.keys(botManager).filter(
-            key =>
-                typeof botManager[key] ===
-                "function"
+    return app._router
+        ? res.redirect(
+            `/status/${encodeURIComponent(req.params.sessionId)}`
         )
-    });
+        : res.status(404).json({
+            success: false
+        });
+
 });
 
-/* =========================================================
-   PAIRING SERVER STATUS
-========================================================= */
+/* ============================================================
+   SESSIONS
+============================================================ */
 
-app.get("/pairing-server", async (req, res) => {
+app.get("/sessions", (req, res) => {
+
+    const manager =
+        global.ETIAS_BOT_MANAGER;
+
+    let live = [];
+
+    if (
+        manager &&
+        typeof manager.getSessions === "function"
+    ) {
+        try {
+            live =
+                manager.getSessions() || [];
+        } catch {}
+    }
+
+    res.json({
+
+        success: true,
+
+        deployments:
+            getDeployments(),
+
+        live
+
+    });
+
+});
+
+app.get("/api/sessions", (req, res) => {
+
+    const manager =
+        global.ETIAS_BOT_MANAGER;
+
+    let live = [];
+
+    if (
+        manager &&
+        typeof manager.getSessions === "function"
+    ) {
+        try {
+            live =
+                manager.getSessions() || [];
+        } catch {}
+    }
+
+    res.json({
+        success: true,
+        sessions: live,
+        deployments: getDeployments()
+    });
+
+});
+
+/* ============================================================
+   USERS
+============================================================ */
+
+app.get("/api/users", (req, res) => {
+
+    const deployments =
+        getDeployments();
+
+    res.json({
+        success: true,
+        total: deployments.length,
+        users: deployments
+    });
+
+});
+
+/* ============================================================
+   RENEW
+============================================================ */
+
+app.post("/renew", (req, res) => {
+
     try {
-        const result =
-            await callPairingServer("/health");
 
-        return res.status(
-            result.ok ? 200 : 503
-        ).json({
-            success: result.ok,
-            pairingServer: PAIRING_SERVER_URL,
-            status: result.status,
-            response: result.data
+        const sessionId =
+            normalizeSessionId(
+                req.body.sessionId
+            );
+
+        const days =
+            Math.min(
+                Math.max(
+                    Number(req.body.days || 30),
+                    1
+                ),
+                MAX_DAYS
+            );
+
+        const deployment =
+            findDeployment(sessionId);
+
+        if (!deployment) {
+
+            return res.status(404).json({
+                success: false,
+                error: "Session not found"
+            });
+
+        }
+
+        const current =
+            new Date(
+                deployment.expireAt || Date.now()
+            );
+
+        const base =
+            current > new Date()
+                ? current
+                : new Date();
+
+        const expireAt =
+            new Date(
+                base.getTime() +
+                days * 24 * 60 * 60 * 1000
+            ).toISOString();
+
+        const updated =
+            updateDeployment(
+                sessionId,
+                {
+                    expireAt,
+                    days:
+                        Number(deployment.days || 0) +
+                        days
+                }
+            );
+
+        res.json({
+            success: true,
+            deployment: updated
         });
+
     } catch (error) {
-        return res.status(503).json({
+
+        res.status(500).json({
             success: false,
-            pairingServer: PAIRING_SERVER_URL,
             error: error.message
         });
+
     }
+
 });
 
-/* =========================================================
-   BOT IMAGE
-========================================================= */
+/* ============================================================
+   DELETE / STOP
+============================================================ */
 
-app.get("/bot-image", async (req, res) => {
-    const possible = [
-        path.join(ROOT, "media", "bot_image.png"),
-        path.join(ROOT, "media", "bot.jpg"),
-        path.join(ROOT, "media", "bot.png"),
-        path.join(ROOT, "assets", "bot_image.png")
-    ];
+app.delete("/sessions/:sessionId", async (req, res) => {
 
-    for (const file of possible) {
-        try {
-            await fsp.access(file);
-            return res.sendFile(file);
-        } catch {
-            // Continue searching.
+    const sessionId =
+        normalizeSessionId(
+            req.params.sessionId
+        );
+
+    const manager =
+        global.ETIAS_BOT_MANAGER;
+
+    try {
+
+        if (
+            manager &&
+            typeof manager.removeSession === "function"
+        ) {
+            await manager.removeSession(
+                sessionId
+            );
         }
+
+        const deployments =
+            getDeployments().filter(
+                item =>
+                    normalizeSessionId(item.sessionId) !==
+                    sessionId
+            );
+
+        saveDeployments(deployments);
+
+        res.json({
+            success: true,
+            sessionId
+        });
+
+    } catch (error) {
+
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+
     }
 
-    return res.status(404).json({
-        success: false,
-        error: "Bot image not found."
-    });
 });
 
-/* =========================================================
-   STATIC FILES
-========================================================= */
+/* ============================================================
+   STATS
+============================================================ */
 
-const publicDir = path.join(ROOT, "public");
+app.get("/deploy-stats", (req, res) => {
+
+    const deployments =
+        getDeployments();
+
+    const manager =
+        global.ETIAS_BOT_MANAGER;
+
+    let live = [];
+
+    if (
+        manager &&
+        typeof manager.getSessions === "function"
+    ) {
+        try {
+            live =
+                manager.getSessions() || [];
+        } catch {}
+    }
+
+    const connected =
+        live.filter(
+            session =>
+                session.connected === true
+        ).length;
+
+    res.json({
+
+        success: true,
+
+        totalUsers:
+            deployments.length,
+
+        onlineUsers:
+            connected,
+
+        connected,
+
+        active:
+            deployments.filter(
+                item =>
+                    new Date(item.expireAt || 0) >
+                    new Date()
+            ).length
+
+    });
+
+});
+
+app.get("/total-users", (req, res) => {
+
+    res.json({
+
+        success: true,
+
+        totalUsers:
+            getDeployments().length
+
+    });
+
+});
+
+/* ============================================================
+   MANAGER
+============================================================ */
+
+app.get("/manager", (req, res) => {
+
+    const manager =
+        global.ETIAS_BOT_MANAGER;
+
+    res.json({
+
+        success: Boolean(manager),
+
+        available:
+            Boolean(manager),
+
+        methods:
+            manager
+                ? Object.keys(manager)
+                : []
+
+    });
+
+});
+
+/* ============================================================
+   PAIRING SERVER
+============================================================ */
+
+app.get("/pairing-server", (req, res) => {
+
+    res.json({
+
+        success: true,
+
+        url:
+            PAIRING_SERVER_URL,
+
+        authTransfer:
+            Boolean(SESSION_TRANSFER_SECRET)
+
+    });
+
+});
+
+/* ============================================================
+   STATIC FILES
+============================================================ */
+
+const publicDir =
+    path.join(ROOT, "public");
 
 if (fs.existsSync(publicDir)) {
+
     app.use(
         express.static(publicDir)
     );
+
 }
 
-/* =========================================================
+/* ============================================================
    404
-========================================================= */
+============================================================ */
 
 app.use((req, res) => {
+
     res.status(404).json({
+
         success: false,
-        error: "Endpoint not found.",
-        path: req.originalUrl
+
+        error:
+            "Route not found",
+
+        path:
+            req.path
+
     });
+
 });
 
-/* =========================================================
-   ERROR HANDLER
-========================================================= */
+/* ============================================================
+   ERROR
+============================================================ */
 
 app.use((error, req, res, next) => {
+
     console.error(
         "[SERVER ERROR]",
         error
     );
 
-    appendLog(
-        "Express error",
-        {
-            error: error.message,
-            stack: error.stack
-        }
-    ).catch(() => {});
-
-    if (res.headersSent) {
-        return next(error);
-    }
-
     res.status(500).json({
+
         success: false,
+
         error:
             error.message ||
-            "Internal server error."
+            "Internal server error"
+
     });
+
 });
 
-/* =========================================================
+/* ============================================================
    EXPORT
-========================================================= */
+   main.js starts the HTTP server.
+============================================================ */
 
 module.exports = app;

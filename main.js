@@ -1,24 +1,5 @@
 "use strict";
 
-/*
-============================================================
- ETIAS-MINI-BOT
- MAIN BOT MANAGER
-============================================================
-
- IMPORTANT ARCHITECTURE
-
- 1. Pairing server handles WhatsApp pairing.
- 2. Pairing server generates:
-       ETIAS-MINI-BOT~12345678
- 3. User submits that Session ID to the deployment dashboard.
- 4. The deployment server calls this manager.
- 5. This file NEVER generates a WhatsApp pairing code.
- 6. This file connects using existing Baileys auth files.
-
-============================================================
-*/
-
 require("dotenv").config();
 
 const fs = require("fs");
@@ -42,126 +23,115 @@ const app = require("./server");
    CONFIG
 ============================================================ */
 
-const PORT = Number(process.env.PORT || 3000);
-
 const ROOT = __dirname;
 
-const AUTH_DIR = path.join(ROOT, "auth");
-const USERS_AUTH_DIR = path.join(AUTH_DIR, "users");
+const PORT =
+    Number(process.env.PORT || 3000);
 
-const DATA_DIR = path.join(ROOT, "data");
-const LOG_DIR = path.join(ROOT, "logs");
-const COMMANDS_DIR = path.join(ROOT, "commands");
-const MEDIA_DIR = path.join(ROOT, "media");
+const AUTH_DIR =
+    path.join(ROOT, "auth");
 
-const DEPLOYED_FILE = path.join(DATA_DIR, "deployed.json");
-const MULTI_SESSION_FILE = path.join(DATA_DIR, "multi_sessions.json");
+const USERS_AUTH_DIR =
+    path.join(AUTH_DIR, "users");
 
-const SESSION_PREFIX = "ETIAS-MINI-BOT~";
+const DATA_DIR =
+    path.join(ROOT, "data");
 
-const DEFAULT_DAYS = Number(process.env.DEFAULT_DAYS || 30);
+const LOG_DIR =
+    path.join(ROOT, "logs");
+
+const COMMANDS_DIR =
+    path.join(ROOT, "commands");
+
+const MEDIA_DIR =
+    path.join(ROOT, "media");
+
+const DEPLOYMENTS_FILE =
+    path.join(
+        DATA_DIR,
+        "deployed.json"
+    );
+
+const SESSION_PREFIX =
+    "ETIAS-MINI-BOT~";
+
+const DEFAULT_DAYS =
+    Number(process.env.DEFAULT_DAYS || 30);
 
 const MONGO_URI =
     process.env.MONGO_URI ||
     process.env.MONGODB_URI ||
     "";
 
+const logger =
+    pino({
+        level:
+            process.env.LOG_LEVEL ||
+            "info"
+    });
+
 /* ============================================================
    DIRECTORIES
 ============================================================ */
 
-const requiredDirs = [
+for (const dir of [
     AUTH_DIR,
     USERS_AUTH_DIR,
     DATA_DIR,
     LOG_DIR,
     COMMANDS_DIR,
     MEDIA_DIR
-];
-
-for (const dir of requiredDirs) {
+]) {
     fs.mkdirSync(dir, {
         recursive: true
     });
 }
 
 /* ============================================================
-   LOGGER
-============================================================ */
-
-const logger = pino({
-    level: process.env.LOG_LEVEL || "info"
-});
-
-/* ============================================================
    RUNTIME STATE
 ============================================================ */
 
 const sessions = new Map();
-const deploymentLogs = new Map();
-const reconnecting = new Set();
 
-let loadedCommands = new Map();
+const commands = new Map();
+
+const reconnectTimers = new Map();
 
 /* ============================================================
-   MONGOOSE SCHEMA
+   MONGO
 ============================================================ */
 
-const DeploymentSchema = new mongoose.Schema(
-    {
+const DeploymentSchema =
+    new mongoose.Schema({
+
         sessionId: {
             type: String,
             unique: true,
             index: true
         },
 
-        userId: {
-            type: String,
-            index: true
-        },
+        phone: String,
 
-        phone: {
-            type: String,
-            index: true
-        },
+        jid: String,
 
-        pairId: {
-            type: String,
-            index: true
-        },
+        userId: String,
 
-        status: {
-            type: String,
-            default: "deployed"
-        },
+        pairId: String,
 
-        connected: {
-            type: Boolean,
-            default: false
-        },
+        status: String,
+
+        connected: Boolean,
 
         mode: {
             type: String,
             default: "public"
         },
 
-        days: {
-            type: Number,
-            default: DEFAULT_DAYS
-        },
+        days: Number,
 
-        expireAt: {
-            type: Date
-        },
+        expireAt: Date,
 
-        authFolder: {
-            type: String
-        },
-
-        pairingCode: {
-            type: String,
-            default: null
-        },
+        authFolder: String,
 
         reconnects: {
             type: Number,
@@ -178,216 +148,416 @@ const DeploymentSchema = new mongoose.Schema(
             default: 0
         },
 
-        createdAt: {
-            type: Date,
-            default: Date.now
-        },
+        createdAt: Date,
 
-        lastSeen: {
-            type: Date
-        }
-    },
-    {
-        timestamps: true
-    }
-);
+        lastSeen: Date
 
-let Deployment;
+    });
 
-try {
-    Deployment =
-        mongoose.models.Deployment ||
-        mongoose.model("Deployment", DeploymentSchema);
-} catch (err) {
-    logger.error({
-        err
-    }, "Failed to initialize Deployment model");
-}
-
-/* ============================================================
-   DATABASE
-============================================================ */
+const Deployment =
+    mongoose.models.ETIASDeployment ||
+    mongoose.model(
+        "ETIASDeployment",
+        DeploymentSchema
+    );
 
 async function connectMongo() {
+
     if (!MONGO_URI) {
+
         logger.warn(
-            "MONGO_URI/MONGODB_URI not configured. Running with local storage only."
+            "[MONGO] MONGO_URI not configured"
         );
-        return;
+
+        return false;
     }
 
     try {
-        await mongoose.connect(MONGO_URI);
 
-        logger.info("MongoDB Connected");
+        await mongoose.connect(
+            MONGO_URI,
+            {
+                serverSelectionTimeoutMS: 10000
+            }
+        );
 
-    } catch (err) {
-        logger.error({
-            err: err.message
-        }, "MongoDB connection failed");
+        logger.info(
+            "[MONGO] Connected"
+        );
+
+        return true;
+
+    } catch (error) {
+
+        logger.error(
+            {
+                error: error.message
+            },
+            "[MONGO] Connection failed"
+        );
+
+        return false;
     }
 }
 
 /* ============================================================
-   LOCAL JSON HELPERS
+   JSON STORAGE
 ============================================================ */
 
-async function ensureJsonFile(file, fallback) {
-    try {
-        await fsp.access(file);
-    } catch {
-        await fsp.writeFile(
-            file,
-            JSON.stringify(fallback, null, 2)
-        );
-    }
-}
+function readDeployments() {
 
-async function readJson(file, fallback = []) {
     try {
-        const raw = await fsp.readFile(file, "utf8");
 
-        if (!raw.trim()) {
-            return fallback;
+        if (!fs.existsSync(
+            DEPLOYMENTS_FILE
+        )) {
+            return [];
         }
 
-        return JSON.parse(raw);
+        const data =
+            JSON.parse(
+                fs.readFileSync(
+                    DEPLOYMENTS_FILE,
+                    "utf8"
+                )
+            );
+
+        return Array.isArray(data)
+            ? data
+            : [];
 
     } catch {
-        return fallback;
+
+        return [];
     }
 }
 
-async function writeJson(file, data) {
+async function writeDeployments(
+    deployments
+) {
+
+    await fsp.mkdir(
+        DATA_DIR,
+        {
+            recursive: true
+        }
+    );
+
     await fsp.writeFile(
-        file,
-        JSON.stringify(data, null, 2)
+        DEPLOYMENTS_FILE,
+        JSON.stringify(
+            deployments,
+            null,
+            2
+        ),
+        "utf8"
     );
 }
 
 /* ============================================================
-   SESSION ID VALIDATION
+   SESSION VALIDATION
 ============================================================ */
 
-function isValidSessionId(sessionId) {
+function normalizeSessionId(
+    sessionId
+) {
+    return String(
+        sessionId || ""
+    )
+        .trim()
+        .toUpperCase();
+}
+
+function isValidSessionId(
+    sessionId
+) {
+
+    return new RegExp(
+        `^${SESSION_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\d{8}$`
+    ).test(
+        normalizeSessionId(sessionId)
+    );
+}
+
+function normalizePhone(phone) {
+
+    return String(
+        phone || ""
+    )
+        .replace(/[^\d]/g, "")
+        .replace(/^00/, "");
+}
+
+function phoneFromJid(jid) {
+
+    if (!jid) {
+        return null;
+    }
+
+    return normalizePhone(
+        String(jid).split("@")[0]
+    );
+}
+
+/* ============================================================
+   AUTH FOLDER
+============================================================ */
+
+function sessionFolderName(
+    sessionId
+) {
+
+    const id =
+        normalizeSessionId(
+            sessionId
+        );
+
+    if (!isValidSessionId(id)) {
+
+        throw new Error(
+            "Invalid Session ID"
+        );
+    }
+
+    return id.replace(
+        /[^A-Z0-9_-]/gi,
+        "_"
+    );
+}
+
+function safeSessionFolder(
+    sessionId
+) {
+
+    return path.join(
+        USERS_AUTH_DIR,
+        sessionFolderName(sessionId)
+    );
+}
+
+function isInsideDirectory(
+    child,
+    parent
+) {
+
+    const childPath =
+        path.resolve(child);
+
+    const parentPath =
+        path.resolve(parent);
+
     return (
-        typeof sessionId === "string" &&
-        /^ETIAS-MINI-BOT~\d{8}$/i.test(
-            sessionId.trim()
+        childPath === parentPath ||
+        childPath.startsWith(
+            parentPath + path.sep
         )
     );
 }
 
-function normalizeSessionId(sessionId) {
-    if (
-        typeof sessionId !== "string"
-    ) {
-        return "";
+function resolveAuthFolder(
+    sessionId,
+    suppliedFolder
+) {
+
+    const id =
+        normalizeSessionId(
+            sessionId
+        );
+
+    const expected =
+        safeSessionFolder(id);
+
+    const candidates = [];
+
+    if (suppliedFolder) {
+
+        const supplied =
+            path.resolve(
+                String(
+                    suppliedFolder
+                )
+            );
+
+        /*
+         * Only allow folders belonging to this
+         * bot's auth directory.
+         */
+        if (
+            isInsideDirectory(
+                supplied,
+                AUTH_DIR
+            )
+        ) {
+            candidates.push(
+                supplied
+            );
+        }
     }
 
-    return sessionId.trim().toUpperCase();
+    candidates.push(expected);
+
+    /*
+     * Legacy exact location.
+     */
+    candidates.push(
+        path.join(
+            AUTH_DIR,
+            sessionFolderName(id)
+        )
+    );
+
+    for (const candidate of candidates) {
+
+        if (
+            fs.existsSync(
+                path.join(
+                    candidate,
+                    "creds.json"
+                )
+            )
+        ) {
+
+            return candidate;
+        }
+    }
+
+    /*
+     * IMPORTANT:
+     * Do NOT scan every user's folder.
+     * That could attach the wrong WhatsApp account.
+     */
+    return null;
 }
 
-function cleanPhone(phone) {
-    if (!phone) {
-        return "";
-    }
+function hasAuthCredentials(
+    folder
+) {
 
-    return String(phone)
-        .replace(/[^\d]/g, "")
-        .replace(/^00/, "");
+    return Boolean(
+        folder &&
+        fs.existsSync(
+            path.join(
+                folder,
+                "creds.json"
+            )
+        )
+    );
 }
 
 /* ============================================================
    LOGGING
 ============================================================ */
 
-function addLog(sessionId, message, level = "info") {
-    const id = normalizeSessionId(sessionId);
+function addLog(
+    sessionId,
+    message
+) {
 
-    if (!id) {
-        return;
-    }
+    const line =
+        `[${new Date().toISOString()}] ` +
+        `[${sessionId}] ` +
+        `${message}`;
 
-    if (!deploymentLogs.has(id)) {
-        deploymentLogs.set(id, []);
-    }
-
-    const entry = {
-        time: new Date().toISOString(),
-        level,
-        message: String(message)
-    };
-
-    const logs = deploymentLogs.get(id);
-
-    logs.push(entry);
-
-    if (logs.length > 500) {
-        logs.splice(
-            0,
-            logs.length - 500
-        );
-    }
+    logger.info(line);
 
     try {
-        const logFile = path.join(
-            LOG_DIR,
-            `${id.replace(/[^a-zA-Z0-9_-]/g, "_")}.log`
-        );
 
         fs.appendFileSync(
-            logFile,
-            `[${entry.time}] [${level.toUpperCase()}] ${entry.message}\n`
+            path.join(
+                LOG_DIR,
+                "bot.log"
+            ),
+            line + "\n"
         );
-    } catch {
-        // Ignore log file errors.
-    }
 
-    logger.info(
-        `[${id}] ${message}`
-    );
+    } catch {}
 }
 
-function getLogs(sessionId) {
-    return (
-        deploymentLogs.get(
-            normalizeSessionId(sessionId)
-        ) || []
-    );
+function getLogs(
+    sessionId
+) {
+
+    try {
+
+        const file =
+            path.join(
+                LOG_DIR,
+                "bot.log"
+            );
+
+        if (!fs.existsSync(file)) {
+            return [];
+        }
+
+        const lines =
+            fs.readFileSync(
+                file,
+                "utf8"
+            )
+            .split("\n")
+            .filter(Boolean);
+
+        if (!sessionId) {
+            return lines.slice(-500);
+        }
+
+        return lines
+            .filter(
+                line =>
+                    line.includes(
+                        `[${sessionId}]`
+                    )
+            )
+            .slice(-500);
+
+    } catch {
+
+        return [];
+    }
 }
 
 /* ============================================================
    COMMAND LOADER
 ============================================================ */
 
-function loadCommands() {
-    loadedCommands = new Map();
+async function loadCommands() {
 
-    if (!fs.existsSync(COMMANDS_DIR)) {
+    commands.clear();
+
+    if (!fs.existsSync(
+        COMMANDS_DIR
+    )) {
         return;
     }
 
-    const files = fs
-        .readdirSync(COMMANDS_DIR)
-        .filter(
-            file =>
-                file.endsWith(".js") &&
-                !file.startsWith("_")
+    const files =
+        await fsp.readdir(
+            COMMANDS_DIR
         );
 
     for (const file of files) {
-        const fullPath = path.join(
-            COMMANDS_DIR,
-            file
-        );
+
+        if (
+            !file.endsWith(".js") ||
+            file.startsWith("_")
+        ) {
+            continue;
+        }
+
+        const fullPath =
+            path.join(
+                COMMANDS_DIR,
+                file
+            );
 
         try {
+
             delete require.cache[
                 require.resolve(fullPath)
             ];
 
-            const command = require(fullPath);
+            const command =
+                require(fullPath);
 
             if (
                 !command ||
@@ -397,343 +567,184 @@ function loadCommands() {
             }
 
             const name =
-                command.name ||
-                path.basename(
-                    file,
-                    ".js"
-                );
+                String(
+                    command.name ||
+                    path.basename(
+                        file,
+                        ".js"
+                    )
+                )
+                .toLowerCase();
 
-            const aliases = Array.isArray(
-                command.aliases
-            )
-                ? command.aliases
-                : command.alias
-                    ? [command.alias]
-                    : [];
-
-            loadedCommands.set(
-                String(name).toLowerCase(),
+            commands.set(
+                name,
                 command
             );
 
-            for (const alias of aliases) {
-                loadedCommands.set(
-                    String(alias).toLowerCase(),
-                    command
-                );
-            }
+        } catch (error) {
 
-        } catch (err) {
-            logger.error({
-                file,
-                error: err.message
-            }, "Failed to load command");
+            logger.error(
+                {
+                    file,
+                    error:
+                        error.message
+                },
+                "[COMMAND] Failed to load"
+            );
         }
     }
 
     logger.info(
-        `[COMMANDS] ${loadedCommands.size} command entries loaded`
+        `[COMMANDS] ${commands.size} commands loaded`
     );
 }
 
 /* ============================================================
-   AUTH FOLDER RESOLUTION
+   DEPLOYMENT STORAGE
 ============================================================ */
 
-function safeSessionFolder(sessionId) {
-    const safe = normalizeSessionId(sessionId)
-        .replace(/[^a-zA-Z0-9_-]/g, "_");
+async function saveDeployment(
+    deployment
+) {
 
-    return path.join(
-        USERS_AUTH_DIR,
-        safe
-    );
-}
-
-/*
- The pairing server may already have an auth folder.
-
- This function checks several possible locations so the bot
- can work with existing deployments without creating pairing
- codes.
-*/
-
-function findAuthFolder(sessionId, suppliedFolder = null) {
-    const candidates = [];
-
-    if (suppliedFolder) {
-        candidates.push(
-            path.resolve(suppliedFolder)
-        );
-    }
-
-    candidates.push(
-        safeSessionFolder(sessionId)
-    );
-
-    /*
-     Older deployment layouts.
-    */
-
-    candidates.push(
-        path.join(
-            AUTH_DIR,
-            normalizeSessionId(sessionId)
-        )
-    );
-
-    /*
-     Search users directory.
-    */
-
-    try {
-        if (fs.existsSync(USERS_AUTH_DIR)) {
-            const entries =
-                fs.readdirSync(
-                    USERS_AUTH_DIR,
-                    {
-                        withFileTypes: true
-                    }
-                );
-
-            for (const entry of entries) {
-                if (!entry.isDirectory()) {
-                    continue;
-                }
-
-                const candidate =
-                    path.join(
-                        USERS_AUTH_DIR,
-                        entry.name
-                    );
-
-                if (
-                    fs.existsSync(
-                        path.join(
-                            candidate,
-                            "creds.json"
-                        )
-                    )
-                ) {
-                    candidates.push(candidate);
-                }
-            }
-        }
-    } catch {
-        // Ignore search errors.
-    }
-
-    for (const folder of candidates) {
-        try {
-            if (
-                fs.existsSync(
-                    path.join(
-                        folder,
-                        "creds.json"
-                    )
-                )
-            ) {
-                return folder;
-            }
-        } catch {
-            // Continue.
-        }
-    }
-
-    return null;
-}
-
-/* ============================================================
-   AUTH STATE VALIDATION
-============================================================ */
-
-function hasAuthCredentials(authFolder) {
-    if (!authFolder) {
-        return false;
-    }
-
-    const creds = path.join(
-        authFolder,
-        "creds.json"
-    );
-
-    return fs.existsSync(creds);
-}
-
-/* ============================================================
-   DEPLOYMENT RECORD
-============================================================ */
-
-async function saveDeployment(record) {
     const deployments =
-        await readJson(
-            DEPLOYED_FILE,
-            []
-        );
+        readDeployments();
 
     const index =
         deployments.findIndex(
             item =>
                 normalizeSessionId(
                     item.sessionId
-                ) === normalizeSessionId(
-                    record.sessionId
+                ) ===
+                normalizeSessionId(
+                    deployment.sessionId
                 )
         );
 
-    if (index >= 0) {
+    const clean = {
+        ...deployment,
+        sessionId:
+            normalizeSessionId(
+                deployment.sessionId
+            )
+    };
+
+    if (index === -1) {
+        deployments.push(clean);
+    } else {
         deployments[index] = {
             ...deployments[index],
-            ...record
+            ...clean
         };
-    } else {
-        deployments.push(record);
     }
 
-    await writeJson(
-        DEPLOYED_FILE,
+    await writeDeployments(
         deployments
     );
 
-    if (Deployment) {
+    /*
+     * MongoDB persistence.
+     */
+    if (
+        mongoose.connection.readyState === 1
+    ) {
+
         try {
+
             await Deployment.findOneAndUpdate(
+
                 {
                     sessionId:
-                        record.sessionId
+                        clean.sessionId
                 },
+
                 {
-                    $set: record
+                    $set: {
+                        ...clean,
+                        expireAt:
+                            clean.expireAt
+                                ? new Date(
+                                    clean.expireAt
+                                )
+                                : null
+                    }
                 },
+
                 {
                     upsert: true,
-                    new: true
+                    new: true,
+                    setDefaultsOnInsert: true
                 }
             );
-        } catch (err) {
-            logger.error({
-                error: err.message
-            }, "Mongo deployment save failed");
+
+        } catch (error) {
+
+            logger.warn(
+                {
+                    error:
+                        error.message
+                },
+                "[MONGO] Deployment save failed"
+            );
         }
     }
 
-    return record;
+    return clean;
 }
 
-async function getDeployment(sessionId) {
+function getDeployment(
+    sessionId
+) {
+
     const id =
-        normalizeSessionId(sessionId);
-
-    if (Deployment) {
-        try {
-            const record =
-                await Deployment.findOne({
-                    sessionId: id
-                }).lean();
-
-            if (record) {
-                return record;
-            }
-        } catch {
-            // Fall back to local database.
-        }
-    }
-
-    const deployments =
-        await readJson(
-            DEPLOYED_FILE,
-            []
+        normalizeSessionId(
+            sessionId
         );
 
-    return (
-        deployments.find(
+    return readDeployments()
+        .find(
             item =>
                 normalizeSessionId(
                     item.sessionId
                 ) === id
-        ) || null
-    );
-}
-
-/* ============================================================
-   PHONE EXTRACTION
-============================================================ */
-
-function jidToPhone(jid) {
-    if (!jid) {
-        return "";
-    }
-
-    const value = String(jid);
-
-    const first =
-        value.split("@")[0];
-
-    const phone =
-        first.split(":")[0];
-
-    return cleanPhone(phone);
-}
-
-/* ============================================================
-   SEND SESSION ID
-============================================================ */
-
-async function sendSessionInfo(sock, session) {
-    if (!sock || !session) {
-        return false;
-    }
-
-    const sessionId =
-        normalizeSessionId(
-            session.sessionId
         );
+}
 
-    if (!isValidSessionId(sessionId)) {
-        return false;
-    }
+/* ============================================================
+   SEND SESSION INFO
+============================================================ */
 
-    const jid =
-        session.userJid ||
-        session.jid;
+async function sendSessionInfo(
+    sock,
+    jid,
+    sessionId
+) {
 
-    if (!jid) {
+    if (!sock || !jid) {
         return false;
     }
 
     try {
+
         await sock.sendMessage(
             jid,
             {
                 text:
-`╭━━━〔 ETIAS-MINI-BOT 〕━━━╮
-┃
-┃ SESSION ID
-┃
-┃ ${sessionId}
-┃
-┃ Copy this Session ID to
-┃ the deployment page.
-┃
-┃ The Session ID is used to
-┃ connect this WhatsApp account.
-┃
-╰━━━━━━━━━━━━━━━━━━━━━━╯`
+                    `*ETIAS-MINI-BOT*\n\n` +
+                    `Your Session ID:\n\n` +
+                    `\`${sessionId}\`\n\n` +
+                    `Use this Session ID on the deployment panel.\n\n` +
+                    `Bringing AI to your fingertips.`
             }
-        );
-
-        addLog(
-            sessionId,
-            "Session ID sent to WhatsApp."
         );
 
         return true;
 
-    } catch (err) {
+    } catch (error) {
+
         addLog(
             sessionId,
-            `Failed to send Session ID: ${err.message}`,
-            "error"
+            `Failed to send Session ID: ${error.message}`
         );
 
         return false;
@@ -748,12 +759,16 @@ async function createSocket(
     sessionId,
     options = {}
 ) {
+
     const id =
-        normalizeSessionId(sessionId);
+        normalizeSessionId(
+            sessionId
+        );
 
     if (!isValidSessionId(id)) {
+
         throw new Error(
-            "Invalid Session ID. Expected ETIAS-MINI-BOT~XXXXXXXX."
+            "Invalid Session ID"
         );
     }
 
@@ -762,94 +777,123 @@ async function createSocket(
 
     if (
         existing &&
-        existing.sock
+        existing.sock &&
+        existing.connected !== false
     ) {
+
         return existing.sock;
     }
 
     const authFolder =
-        findAuthFolder(
+        resolveAuthFolder(
             id,
             options.authFolder
         );
 
     if (!authFolder) {
+
         throw new Error(
-            "Authentication files were not found for this Session ID."
+            `Authentication folder not found for ${id}`
         );
     }
 
-    if (
-        !hasAuthCredentials(
-            authFolder
-        )
-    ) {
+    if (!hasAuthCredentials(
+        authFolder
+    )) {
+
         throw new Error(
-            "creds.json was not found. Pair the WhatsApp number first."
+            `creds.json not found for ${id}`
         );
     }
-
-    addLog(
-        id,
-        `Using auth folder: ${authFolder}`
-    );
 
     const {
         state,
         saveCreds
-    } = await useMultiFileAuthState(
-        authFolder
-    );
+    } =
+        await useMultiFileAuthState(
+            authFolder
+        );
 
     const deployment =
-        await getDeployment(id);
+        getDeployment(id);
+
+    const userJid =
+        options.jid ||
+        deployment?.jid ||
+        null;
+
+    const phone =
+        normalizePhone(
+            options.phone ||
+            deployment?.phone ||
+            phoneFromJid(userJid)
+        );
 
     const session = {
+
         sessionId: id,
+
         sock: null,
-        authFolder,
-        state,
-        saveCreds,
-        userJid:
-            deployment?.jid ||
-            null,
-        phone:
-            cleanPhone(
-                deployment?.phone ||
-                options.phone ||
-                ""
-            ),
+
+        userJid,
+
+        phone,
+
         pairId:
-            deployment?.pairId ||
-            options.pairId ||
+            options.pairingId ||
+            deployment?.pairingId ||
             null,
+
+        authFolder,
+
+        status: "connecting",
+
+        connected: false,
+
         mode:
             deployment?.mode ||
+            options.mode ||
             "public",
+
         days:
             Number(
-                deployment?.days ||
                 options.days ||
+                deployment?.days ||
                 DEFAULT_DAYS
             ),
-        connected: false,
+
+        expireAt:
+            options.expireAt ||
+            deployment?.expireAt ||
+            null,
+
         reconnects:
             Number(
                 deployment?.reconnects || 0
             ),
+
         messages:
             Number(
                 deployment?.messages || 0
             ),
+
         commandCount:
             Number(
                 deployment?.commandCount || 0
             ),
+
         createdAt:
             deployment?.createdAt ||
             new Date().toISOString(),
+
         lastSeen:
-            new Date().toISOString()
+            new Date().toISOString(),
+
+        sessionMessageSent:
+            Boolean(
+                deployment?.sessionMessageSent
+            )
+
     };
 
     sessions.set(
@@ -859,160 +903,248 @@ async function createSocket(
 
     const sock =
         makeWASocket({
+
             auth: state,
+
             browser:
                 Browsers.macOS(
                     "Chrome"
                 ),
-            logger: pino({
-                level:
-                    process.env.BAILEYS_LOG_LEVEL ||
-                    "silent"
-            }),
+
+            logger:
+                pino({
+                    level: "silent"
+                }),
+
             printQRInTerminal: false,
+
             markOnlineOnConnect: true,
+
             syncFullHistory: false,
-            generateHighQualityLinkPreview: true
+
+            generateHighQualityLinkPreview: false
+
         });
 
     session.sock = sock;
 
-    /*
-    ========================================================
-     SAVE AUTH CREDENTIALS
-    ========================================================
-    */
-
     sock.ev.on(
         "creds.update",
         async () => {
+
             try {
+
                 await saveCreds();
-            } catch (err) {
+
+            } catch (error) {
+
                 addLog(
                     id,
-                    `Failed to save credentials: ${err.message}`,
-                    "error"
+                    `Failed to save credentials: ${error.message}`
                 );
             }
         }
     );
 
-    /*
-    ========================================================
-     CONNECTION UPDATE
-    ========================================================
-    */
+    /* ========================================================
+       CONNECTION
+    ======================================================== */
 
     sock.ev.on(
         "connection.update",
         async update => {
+
             const {
                 connection,
                 lastDisconnect
             } = update;
 
             if (connection === "connecting") {
+
+                session.status =
+                    "connecting";
+
+                session.connected =
+                    false;
+
                 addLog(
                     id,
                     "Connecting to WhatsApp..."
                 );
+
+                return;
             }
 
             if (connection === "open") {
-                session.connected = true;
+
+                session.status =
+                    "connected";
+
+                session.connected =
+                    true;
+
                 session.lastSeen =
                     new Date().toISOString();
 
-                const jid =
-                    sock.user?.id
-                        ? jidNormalizedUser(
-                            sock.user.id
-                        )
-                        : session.userJid;
+                session.userJid =
+                    sock.user?.id ||
+                    session.userJid ||
+                    null;
 
-                if (jid) {
-                    session.userJid =
-                        jid;
+                session.phone =
+                    phoneFromJid(
+                        session.userJid
+                    ) ||
+                    session.phone;
 
-                    session.phone =
-                        jidToPhone(jid);
-                }
+                clearReconnectTimer(id);
 
                 addLog(
                     id,
-                    `WhatsApp connected${session.phone ? `: ${session.phone}` : ""}.`
+                    `Connected as ${session.userJid || session.phone}`
                 );
 
                 await saveDeployment({
+
                     sessionId: id,
+
                     phone:
                         session.phone,
-                    pairId:
-                        session.pairId,
+
                     jid:
                         session.userJid,
+
+                    pairId:
+                        session.pairId,
+
                     status:
                         "connected",
-                    connected:
-                        true,
+
+                    connected: true,
+
                     mode:
                         session.mode,
+
                     days:
                         session.days,
+
+                    expireAt:
+                        session.expireAt,
+
                     authFolder:
                         session.authFolder,
+
                     reconnects:
                         session.reconnects,
+
                     messages:
                         session.messages,
+
                     commandCount:
                         session.commandCount,
+
+                    createdAt:
+                        session.createdAt,
+
                     lastSeen:
-                        new Date()
+                        session.lastSeen,
+
+                    sessionMessageSent:
+                        session.sessionMessageSent
                 });
 
                 /*
-                Main.js does NOT generate a pairing code.
-
-                If a deployment has just been created and the
-                session ID has not already been sent, send it.
-                */
-
-                const deployment =
-                    await getDeployment(id);
-
+                 * If this was the first successful
+                 * connection and we know the JID,
+                 * send the Session ID.
+                 */
                 if (
-                    deployment &&
-                    !deployment.sessionMessageSent
+                    !session.sessionMessageSent &&
+                    session.userJid
                 ) {
+
                     const sent =
                         await sendSessionInfo(
                             sock,
-                            {
-                                ...session,
-                                sessionId: id
-                            }
+                            session.userJid,
+                            id
                         );
 
                     if (sent) {
+
+                        session.sessionMessageSent =
+                            true;
+
                         await saveDeployment({
+
                             sessionId: id,
-                            sessionMessageSent:
-                                true,
-                            connected: true,
+
+                            phone:
+                                session.phone,
+
+                            jid:
+                                session.userJid,
+
+                            pairId:
+                                session.pairId,
+
                             status:
                                 "connected",
+
+                            connected: true,
+
+                            mode:
+                                session.mode,
+
+                            days:
+                                session.days,
+
+                            expireAt:
+                                session.expireAt,
+
+                            authFolder:
+                                session.authFolder,
+
+                            reconnects:
+                                session.reconnects,
+
+                            messages:
+                                session.messages,
+
+                            commandCount:
+                                session.commandCount,
+
+                            createdAt:
+                                session.createdAt,
+
                             lastSeen:
-                                new Date()
+                                session.lastSeen,
+
+                            sessionMessageSent: true
                         });
                     }
                 }
+
+                return;
             }
 
             if (connection === "close") {
+
                 session.connected =
                     false;
+
+                session.status =
+                    "disconnected";
+
+                session.lastSeen =
+                    new Date().toISOString();
+
+                /*
+                 * IMPORTANT:
+                 * Remove the closed socket before
+                 * reconnecting.
+                 */
+                session.sock = null;
 
                 const statusCode =
                     lastDisconnect
@@ -1020,131 +1152,143 @@ async function createSocket(
                         ?.output
                         ?.statusCode;
 
-                addLog(
-                    id,
-                    `WhatsApp connection closed. Status: ${statusCode || "unknown"}`
-                );
+                const loggedOut =
+                    statusCode ===
+                    DisconnectReason.loggedOut;
+
+                const badSession =
+                    statusCode ===
+                    DisconnectReason.badSession;
 
                 await saveDeployment({
+
                     sessionId: id,
-                    connected: false,
+
+                    phone:
+                        session.phone,
+
+                    jid:
+                        session.userJid,
+
+                    pairId:
+                        session.pairId,
+
                     status:
-                        "disconnected",
+                        loggedOut ||
+                        badSession
+                            ? "logged_out"
+                            : "disconnected",
+
+                    connected: false,
+
+                    mode:
+                        session.mode,
+
+                    days:
+                        session.days,
+
+                    expireAt:
+                        session.expireAt,
+
+                    authFolder:
+                        session.authFolder,
+
+                    reconnects:
+                        session.reconnects,
+
+                    messages:
+                        session.messages,
+
+                    commandCount:
+                        session.commandCount,
+
+                    createdAt:
+                        session.createdAt,
+
                     lastSeen:
-                        new Date()
+                        session.lastSeen,
+
+                    sessionMessageSent:
+                        session.sessionMessageSent
                 });
 
-                /*
-                Logged out / removed account.
-                Do not reconnect forever.
-                */
+                addLog(
+                    id,
+                    `Connection closed. code=${statusCode || "unknown"}`
+                );
 
                 if (
-                    statusCode ===
-                    DisconnectReason.loggedOut
+                    loggedOut ||
+                    badSession
                 ) {
-                    addLog(
-                        id,
-                        "WhatsApp logged out. Automatic reconnect disabled.",
-                        "warn"
-                    );
 
                     session.status =
-                        "logged_out";
-
-                    sessions.delete(id);
+                        loggedOut
+                            ? "logged_out"
+                            : "bad_session";
 
                     return;
                 }
 
-                /*
-                Bad session / replaced / invalid auth.
-                */
-
-                if (
-                    statusCode ===
-                    DisconnectReason.badSession
-                ) {
-                    addLog(
-                        id,
-                        "Bad WhatsApp session. Re-pairing is required.",
-                        "error"
-                    );
-
-                    session.status =
-                        "bad_session";
-
-                    return;
-                }
-
-                /*
-                Normal network/server disconnect.
-                */
-
-                await scheduleReconnect(
+                scheduleReconnect(
                     id
                 );
             }
         }
     );
 
-    /*
-    ========================================================
-     MESSAGE HANDLER
-    ========================================================
-    */
+    /* ========================================================
+       MESSAGES
+    ======================================================== */
 
     sock.ev.on(
         "messages.upsert",
         async event => {
-            if (
-                !event ||
-                !Array.isArray(
-                    event.messages
-                )
-            ) {
-                return;
-            }
 
-            for (
-                const message
-                of event.messages
-            ) {
-                try {
+            try {
+
+                if (!event?.messages) {
+                    return;
+                }
+
+                for (const message of event.messages) {
+
                     await processMessage(
                         id,
                         message
                     );
-                } catch (err) {
-                    addLog(
-                        id,
-                        `Message processing error: ${err.message}`,
-                        "error"
-                    );
                 }
+
+            } catch (error) {
+
+                addLog(
+                    id,
+                    `Message handler error: ${error.message}`
+                );
             }
         }
     );
 
-    /*
-    ========================================================
-     GROUP PARTICIPANT EVENTS
-    ========================================================
-    */
+    /* ========================================================
+       GROUP PARTICIPANTS
+    ======================================================== */
 
     sock.ev.on(
         "group-participants.update",
         async event => {
+
             try {
+
                 await handleGroupParticipants(
                     id,
                     event
                 );
-            } catch (err) {
+
+            } catch (error) {
+
                 addLog(
                     id,
-                    `Group event error: ${err.message}`,
-                    "error"
+                    `Group event error: ${error.message}`
                 );
             }
         }
@@ -1157,12 +1301,36 @@ async function createSocket(
    RECONNECT
 ============================================================ */
 
-async function scheduleReconnect(sessionId) {
+function clearReconnectTimer(
+    sessionId
+) {
+
+    const timer =
+        reconnectTimers.get(
+            sessionId
+        );
+
+    if (timer) {
+
+        clearTimeout(timer);
+
+        reconnectTimers.delete(
+            sessionId
+        );
+    }
+}
+
+function scheduleReconnect(
+    sessionId
+) {
+
     const id =
-        normalizeSessionId(sessionId);
+        normalizeSessionId(
+            sessionId
+        );
 
     if (
-        reconnecting.has(id)
+        reconnectTimers.has(id)
     ) {
         return;
     }
@@ -1174,8 +1342,6 @@ async function scheduleReconnect(sessionId) {
         return;
     }
 
-    reconnecting.add(id);
-
     session.reconnects =
         Number(
             session.reconnects || 0
@@ -1183,24 +1349,27 @@ async function scheduleReconnect(sessionId) {
 
     const delay =
         Math.min(
-            60000,
             5000 *
-                Math.min(
-                    session.reconnects,
-                    12
-                )
+            Math.max(
+                session.reconnects,
+                1
+            ),
+            60000
         );
 
     addLog(
         id,
-        `Reconnecting in ${Math.round(delay / 1000)} seconds...`
+        `Reconnecting in ${delay}ms...`
     );
 
-    setTimeout(
-        async () => {
-            reconnecting.delete(id);
+    const timer =
+        setTimeout(
+            async () => {
 
-            try {
+                reconnectTimers.delete(
+                    id
+                );
+
                 const current =
                     sessions.get(id);
 
@@ -1208,49 +1377,64 @@ async function scheduleReconnect(sessionId) {
                     return;
                 }
 
-                const sock =
+                try {
+
+                    current.status =
+                        "reconnecting";
+
                     await createSocket(
                         id,
                         {
                             authFolder:
                                 current.authFolder,
+
                             phone:
                                 current.phone,
-                            pairId:
+
+                            jid:
+                                current.userJid,
+
+                            pairingId:
                                 current.pairId,
+
                             days:
-                                current.days
+                                current.days,
+
+                            expireAt:
+                                current.expireAt
                         }
                     );
 
-                current.sock =
-                    sock;
+                } catch (error) {
 
-            } catch (err) {
-                addLog(
-                    id,
-                    `Reconnect failed: ${err.message}`,
-                    "error"
-                );
+                    addLog(
+                        id,
+                        `Reconnect failed: ${error.message}`
+                    );
 
-                setTimeout(
-                    () =>
-                        scheduleReconnect(
-                            id
-                        ),
-                    10000
-                );
-            }
-        },
-        delay
+                    scheduleReconnect(
+                        id
+                    );
+                }
+
+            },
+            delay
+        );
+
+    reconnectTimers.set(
+        id,
+        timer
     );
 }
 
 /* ============================================================
-   COMMAND HELPERS
+   MESSAGE HELPERS
 ============================================================ */
 
-function getMessageText(message) {
+function getMessageText(
+    message
+) {
+
     const msg =
         message?.message;
 
@@ -1260,46 +1444,31 @@ function getMessageText(message) {
 
     return (
         msg.conversation ||
-        msg.extendedTextMessage
-            ?.text ||
-        msg.imageMessage
-            ?.caption ||
-        msg.videoMessage
-            ?.caption ||
-        msg.documentMessage
-            ?.caption ||
-        msg.buttonsResponseMessage
-            ?.selectedButtonId ||
-        msg.listResponseMessage
-            ?.singleSelectReply
-            ?.selectedRowId ||
+        msg.extendedTextMessage?.text ||
+        msg.imageMessage?.caption ||
+        msg.videoMessage?.caption ||
+        msg.documentMessage?.caption ||
         ""
     );
 }
 
-function getMessageContext(message) {
-    const key =
-        message?.key || {};
+function getMessageChat(
+    message
+) {
 
-    const remoteJid =
-        key.remoteJid || "";
+    return (
+        message?.key?.remoteJid ||
+        ""
+    );
+}
 
-    const participant =
-        key.participant ||
-        remoteJid;
+function isGroupJid(
+    jid
+) {
 
-    return {
-        remoteJid,
-        participant,
-        sender:
-            participant,
-        isGroup:
-            remoteJid.endsWith(
-                "@g.us"
-            ),
-        fromMe:
-            Boolean(key.fromMe)
-    };
+    return String(
+        jid || ""
+    ).endsWith("@g.us");
 }
 
 /* ============================================================
@@ -1310,363 +1479,286 @@ async function runBuiltInCommand(
     session,
     message,
     command,
-    args,
-    context
+    args
 ) {
+
     const sock =
         session.sock;
 
-    const jid =
-        context.remoteJid;
-
-    const text =
-        args.join(" ");
+    const chat =
+        getMessageChat(
+            message
+        );
 
     switch (command) {
-        case "test1": {
+
+        case "ping":
+
             await sock.sendMessage(
-                jid,
+                chat,
                 {
                     text:
-                        "🏓 Pong!\n\nETIAS-MINI-BOT is online."
+                        "🏓 ETIAS-MINI-BOT is online!"
                 }
             );
 
             return true;
-        }
 
-        case "test2": {
-            const uptime =
-                process.uptime();
+        case "alive":
 
             await sock.sendMessage(
-                jid,
+                chat,
                 {
                     text:
-`╭━━〔 ETIAS-MINI-BOT 〕━━╮
-┃
-┃ STATUS: ONLINE
-┃
-┃ Session:
-┃ ${session.sessionId}
-┃
-┃ Phone:
-┃ ${session.phone || "Unknown"}
-┃
-┃ Mode:
-┃ ${session.mode}
-┃
-┃ Uptime:
-┃ ${formatUptime(uptime)}
-┃
-╰━━━━━━━━━━━━━━━━━━━━╯`
+                        `🤖 *ETIAS-MINI-BOT*\n\n` +
+                        `Status: ${session.connected ? "ONLINE" : "OFFLINE"}\n` +
+                        `Session: ${session.sessionId}\n` +
+                        `Phone: ${session.phone || "Unknown"}`
                 }
             );
 
             return true;
-        }
 
-        case "session": {
+        case "session":
+
             await sock.sendMessage(
-                jid,
+                chat,
                 {
                     text:
-`╭━━〔 SESSION ID 〕━━╮
-┃
-┃ ${session.sessionId}
-┃
-╰━━━━━━━━━━━━━━━━╯`
+                        `*SESSION ID*\n\n` +
+                        `\`${session.sessionId}\``
                 }
             );
 
             return true;
-        }
 
-        case "status": {
+        case "status":
+
             await sock.sendMessage(
-                jid,
+                chat,
                 {
                     text:
-`╭━━〔 BOT STATUS 〕━━╮
-┃
-┃ Connection: ${
-    session.connected
-        ? "ONLINE"
-        : "OFFLINE"
-}
-┃ Mode: ${session.mode}
-┃ Messages: ${session.messages}
-┃ Commands: ${session.commandCount}
-┃ Reconnects: ${session.reconnects}
-┃
-╰━━━━━━━━━━━━━━━━━━╯`
+                        `*ETIAS STATUS*\n\n` +
+                        `Session: ${session.sessionId}\n` +
+                        `Connected: ${session.connected}\n` +
+                        `Messages: ${session.messages}\n` +
+                        `Commands: ${session.commandCount}\n` +
+                        `Reconnects: ${session.reconnects}`
                 }
             );
 
             return true;
-        }
 
-        case "mode": {
-            const requested =
-                String(
-                    args[0] || ""
-                ).toLowerCase();
+        case "mode":
 
             if (
-                requested !== "public" &&
-                requested !== "private"
+                args[0] &&
+                ["public", "private"].includes(
+                    args[0].toLowerCase()
+                )
             ) {
-                await sock.sendMessage(
-                    jid,
-                    {
-                        text:
-                            "Usage: .mode public\nor\n.mode private"
-                    }
-                );
 
-                return true;
+                session.mode =
+                    args[0].toLowerCase();
+
+                await saveDeployment({
+
+                    sessionId:
+                        session.sessionId,
+
+                    phone:
+                        session.phone,
+
+                    jid:
+                        session.userJid,
+
+                    pairId:
+                        session.pairId,
+
+                    status:
+                        session.status,
+
+                    connected:
+                        session.connected,
+
+                    mode:
+                        session.mode,
+
+                    days:
+                        session.days,
+
+                    expireAt:
+                        session.expireAt,
+
+                    authFolder:
+                        session.authFolder,
+
+                    reconnects:
+                        session.reconnects,
+
+                    messages:
+                        session.messages,
+
+                    commandCount:
+                        session.commandCount,
+
+                    createdAt:
+                        session.createdAt,
+
+                    lastSeen:
+                        new Date().toISOString()
+                });
             }
 
-            /*
-            Only the owner can change this in a real command
-            implementation. Keep the state change here so custom
-            owner checks can also be added.
-            */
-
-            session.mode =
-                requested;
-
-            await saveDeployment({
-                sessionId:
-                    session.sessionId,
-                mode:
-                    requested
-            });
-
             await sock.sendMessage(
-                jid,
+                chat,
                 {
                     text:
-                        `Bot mode changed to ${requested.toUpperCase()}.`
+                        `Mode: ${session.mode}`
                 }
             );
 
             return true;
-        }
 
-        case "antilink": {
+        case "menu":
+        case "help":
+
             await sock.sendMessage(
-                jid,
+                chat,
                 {
                     text:
-`Anti-link system is available.
-
-Use your dedicated anti-link
-command module for group settings.`
+                        `*ETIAS-MINI-BOT*\n\n` +
+                        `.ping\n` +
+                        `.alive\n` +
+                        `.session\n` +
+                        `.status\n` +
+                        `.mode public\n` +
+                        `.mode private\n` +
+                        `.menu`
                 }
             );
 
             return true;
-        }
-
-        case "antidelete": {
-            await sock.sendMessage(
-                jid,
-                {
-                    text:
-                        "Anti-delete is available through the loaded command/event modules."
-                }
-            );
-
-            return true;
-        }
-
-        case "viewonce": {
-            await sock.sendMessage(
-                jid,
-                {
-                    text:
-                        "View-once handling is available through the loaded command/event modules."
-                }
-            );
-
-            return true;
-        }
-
-        case "test3":
-        case "test4": {
-            const commands =
-                [...loadedCommands.keys()]
-                    .filter(
-                        name =>
-                            name.length > 0
-                    );
-
-            const unique =
-                [...new Set(commands)];
-
-            await sock.sendMessage(
-                jid,
-                {
-                    text:
-`╭━━━〔 ETIAS-MINI-BOT 〕━━━╮
-┃
-┃ 🤖 ONLINE
-┃
-┃ Prefix: .
-┃ Session:
-┃ ${session.sessionId}
-┃
-┃ Built-in commands:
-┃ • .ping
-┃ • .alive
-┃ • .session
-┃ • .status
-┃ • .mode public
-┃ • .mode private
-┃ • .menu
-┃
-┃ Loaded commands:
-┃ ${unique
-    .slice(0, 80)
-    .map(x => `• .${x}`)
-    .join("\n┃ ")}
-┃
-╰━━━━━━━━━━━━━━━━━━━━━━╯`
-                }
-            );
-
-            return true;
-        }
 
         default:
+
             return false;
     }
 }
 
 /* ============================================================
-   CUSTOM COMMAND RUNNER
+   CUSTOM COMMAND
 ============================================================ */
 
 async function runCustomCommand(
     session,
     message,
     command,
-    args,
-    context
+    args
 ) {
-    const cmd =
-        loadedCommands.get(
-            command
+
+    const handler =
+        commands.get(
+            command.toLowerCase()
         );
 
-    if (!cmd) {
+    if (!handler) {
         return false;
     }
 
-    if (
-        typeof cmd.execute !==
-        "function"
-    ) {
-        return false;
-    }
+    try {
 
-    const sock =
-        session.sock;
+        const execute =
+            handler.execute ||
+            handler.run ||
+            handler.handler;
 
-    /*
-    Support several common command APIs.
-    */
+        if (
+            typeof execute !== "function"
+        ) {
+            return false;
+        }
 
-    await cmd.execute(
-        sock,
-        message,
-        args,
-        {
-            ...context,
+        await execute({
+
+            sock:
+                session.sock,
+
+            message,
+
+            args,
+
             session,
+
             sessionId:
                 session.sessionId,
-            bot: sock
-        }
-    );
 
-    return true;
+            bot:
+                session,
+
+            phone:
+                session.phone,
+
+            jid:
+                session.userJid
+
+        });
+
+        return true;
+
+    } catch (error) {
+
+        addLog(
+            session.sessionId,
+            `Command ${command} failed: ${error.message}`
+        );
+
+        return false;
+    }
 }
 
 /* ============================================================
-   MESSAGE PROCESSING
+   MESSAGE PROCESSOR
 ============================================================ */
 
 async function processMessage(
     sessionId,
     message
 ) {
+
     const session =
         sessions.get(
-            normalizeSessionId(
-                sessionId
-            )
+            sessionId
         );
 
     if (!session) {
         return;
     }
 
-    if (!message) {
+    session.lastSeen =
+        new Date().toISOString();
+
+    if (
+        !message ||
+        message.key?.fromMe
+    ) {
         return;
     }
-
-    const context =
-        getMessageContext(
-            message
-        );
 
     const text =
         getMessageText(
             message
         ).trim();
 
-    session.messages =
-        Number(
-            session.messages || 0
-        ) + 1;
-
-    session.lastSeen =
-        new Date().toISOString();
-
-    if (!text) {
-        return;
-    }
-
-    /*
-    Ignore messages sent by the bot itself unless a command/event
-    specifically needs them.
-    */
-
-    if (context.fromMe) {
-        return;
-    }
-
-    /*
-    Commands require the configured prefix.
-    */
-
-    if (
-        !text.startsWith(".")
-    ) {
-        return;
-    }
-
-    const body =
-        text.slice(1).trim();
-
-    if (!body) {
+    if (!text.startsWith(".")) {
         return;
     }
 
     const parts =
-        body.split(/\s+/);
+        text
+            .slice(1)
+            .trim()
+            .split(/\s+/);
 
     const command =
         String(
@@ -1676,83 +1768,95 @@ async function processMessage(
     const args =
         parts;
 
-    session.commandCount =
+    if (!command) {
+        return;
+    }
+
+    session.messages =
         Number(
-            session.commandCount || 0
+            session.messages || 0
         ) + 1;
 
-    let handled = false;
+    let handled =
+        await runBuiltInCommand(
+            session,
+            message,
+            command,
+            args
+        );
 
-    try {
+    if (!handled) {
+
         handled =
-            await runBuiltInCommand(
+            await runCustomCommand(
                 session,
                 message,
                 command,
-                args,
-                context
+                args
             );
+    }
 
-        if (!handled) {
-            handled =
-                await runCustomCommand(
-                    session,
-                    message,
-                    command,
-                    args,
-                    context
-                );
-        }
+    if (handled) {
 
-        if (handled) {
-            addLog(
-                session.sessionId,
-                `Command executed: .${command}`
-            );
-        }
-
-    } catch (err) {
-        addLog(
-            session.sessionId,
-            `Command .${command} failed: ${err.message}`,
-            "error"
-        );
-
-        try {
-            await session.sock.sendMessage(
-                context.remoteJid,
-                {
-                    text:
-                        `❌ Command error: ${err.message}`
-                }
-            );
-        } catch {
-            // Ignore reply errors.
-        }
+        session.commandCount =
+            Number(
+                session.commandCount || 0
+            ) + 1;
     }
 
     /*
-    Periodically persist statistics.
-    */
-
+     * Persist counters periodically.
+     */
     if (
-        session.commandCount %
-            10 ===
-        0
+        session.commandCount % 10 === 0
     ) {
+
         await saveDeployment({
+
             sessionId:
                 session.sessionId,
+
+            phone:
+                session.phone,
+
+            jid:
+                session.userJid,
+
+            pairId:
+                session.pairId,
+
+            status:
+                session.status,
+
             connected:
                 session.connected,
-            messages:
-                session.messages,
-            commandCount:
-                session.commandCount,
+
+            mode:
+                session.mode,
+
+            days:
+                session.days,
+
+            expireAt:
+                session.expireAt,
+
+            authFolder:
+                session.authFolder,
+
             reconnects:
                 session.reconnects,
+
+            messages:
+                session.messages,
+
+            commandCount:
+                session.commandCount,
+
+            createdAt:
+                session.createdAt,
+
             lastSeen:
-                new Date()
+                session.lastSeen
         });
     }
 }
@@ -1765,57 +1869,44 @@ async function handleGroupParticipants(
     sessionId,
     event
 ) {
+
     const session =
         sessions.get(
-            normalizeSessionId(
-                sessionId
-            )
+            sessionId
         );
 
     if (!session) {
         return;
     }
 
-    const {
-        id,
-        participants,
-        action
-    } = event;
-
-    if (!id) {
-        return;
-    }
+    addLog(
+        sessionId,
+        `Group participant event: ${event.action || "unknown"}`
+    );
 
     /*
-    If you already have dedicated welcome/goodbye commands,
-    they can handle these events. This base manager keeps the
-    connection event available without forcing a particular
-    message design.
-    */
-
-    if (
-        action === "add" ||
-        action === "remove"
-    ) {
-        addLog(
-            sessionId,
-            `Group participant event: ${action} (${participants?.length || 0})`
-        );
-    }
+     * Your existing welcome/goodbye,
+     * antilink and group features can
+     * use this event without changing
+     * the multi-user architecture.
+     */
 }
 
 /* ============================================================
    DEPLOY SESSION
 ============================================================ */
 
-async function deploySession(options = {}) {
+async function deploySession(
+    options = {}
+) {
+
     const sessionId =
         normalizeSessionId(
             options.sessionId
         );
 
     const phone =
-        cleanPhone(
+        normalizePhone(
             options.phone
         );
 
@@ -1828,267 +1919,413 @@ async function deploySession(options = {}) {
             )
         );
 
-    if (
-        !isValidSessionId(
-            sessionId
-        )
-    ) {
-        throw new Error(
-            "Invalid Session ID. Use ETIAS-MINI-BOT~XXXXXXXX."
-        );
+    if (!isValidSessionId(
+        sessionId
+    )) {
+
+        return {
+            success: false,
+            error: "Invalid Session ID"
+        };
     }
 
     /*
-    The auth state must already exist.
-
-    This is intentionally different from the old architecture:
-    main.js does not call requestPairingCode().
-    */
-
+     * Find ONLY this session's auth folder.
+     */
     const authFolder =
-        findAuthFolder(
+        resolveAuthFolder(
             sessionId,
             options.authFolder
         );
 
     if (!authFolder) {
-        throw new Error(
-            "No WhatsApp authentication state found for this Session ID. Pair the number first."
-        );
+
+        return {
+            success: false,
+            error:
+                `Auth state not found for ${sessionId}`
+        };
     }
 
-    if (
-        !hasAuthCredentials(
-            authFolder
-        )
-    ) {
-        throw new Error(
-            "creds.json is missing for this Session ID."
-        );
+    if (!hasAuthCredentials(
+        authFolder
+    )) {
+
+        return {
+            success: false,
+            error:
+                `creds.json not found for ${sessionId}`
+        };
     }
 
     /*
-    Prevent two active deployments using the same number.
-    */
+     * Prevent the same WhatsApp account
+     * from being connected twice.
+     */
+    for (const [
+        existingId,
+        session
+    ] of sessions.entries()) {
 
-    for (
-        const [id, session]
-        of sessions.entries()
-    ) {
         if (
-            id !== sessionId &&
+            existingId !== sessionId &&
+            session.phone &&
             phone &&
-            cleanPhone(
+            normalizePhone(
                 session.phone
             ) === phone &&
             session.connected
         ) {
-            throw new Error(
-                "This WhatsApp number already has an active bot deployment."
-            );
+
+            return {
+                success: false,
+                error:
+                    "This WhatsApp number is already connected",
+                sessionId:
+                    existingId
+            };
         }
     }
 
-    const expireAt =
-        new Date(
-            Date.now() +
-                days *
-                    24 *
-                    60 *
-                    60 *
-                    1000
-        );
-
     const existing =
-        await getDeployment(
-            sessionId
-        );
-
-    const record = {
-        sessionId,
-        phone:
-            phone ||
-            existing?.phone ||
-            "",
-        pairId:
-            options.pairId ||
-            existing?.pairId ||
-            null,
-        jid:
-            options.jid ||
-            existing?.jid ||
-            null,
-        status:
-            "starting",
-        connected:
-            false,
-        mode:
-            options.mode ||
-            existing?.mode ||
-            "public",
-        days,
-        expireAt,
-        authFolder,
-        reconnects:
-            Number(
-                existing?.reconnects ||
-                0
-            ),
-        messages:
-            Number(
-                existing?.messages ||
-                0
-            ),
-        commandCount:
-            Number(
-                existing?.commandCount ||
-                0
-            ),
-        createdAt:
-            existing?.createdAt ||
-            new Date(),
-        lastSeen:
-            new Date()
-    };
-
-    await saveDeployment(
-        record
-    );
-
-    addLog(
-        sessionId,
-        `Starting deployment for ${record.phone || "unknown number"}.`
-    );
-
-    let session =
         sessions.get(
             sessionId
         );
 
     if (
-        session &&
-        session.sock
+        existing &&
+        existing.sock &&
+        existing.connected
     ) {
-        addLog(
-            sessionId,
-            "Existing socket found. Reusing connection."
-        );
 
         return {
+
             success: true,
+
             sessionId,
+
             phone:
-                record.phone,
-            days,
-            expireAt,
+                existing.phone,
+
+            jid:
+                existing.userJid,
+
+            days:
+                existing.days,
+
+            expireAt:
+                existing.expireAt,
+
             status:
-                session.connected
-                    ? "connected"
-                    : "starting"
+                "connected",
+
+            connected: true,
+
+            authFolder:
+                existing.authFolder,
+
+            alreadyRunning: true
+
         };
     }
 
-    const sock =
-        await createSocket(
-            sessionId,
-            {
-                authFolder,
-                phone:
-                    record.phone,
-                pairId:
-                    record.pairId,
-                days
-            }
-        );
+    const expireAt =
+        options.expireAt ||
+        new Date(
+            Date.now() +
+            days *
+            24 *
+            60 *
+            60 *
+            1000
+        ).toISOString();
 
-    session =
-        sessions.get(
-            sessionId
-        );
+    await saveDeployment({
 
-    if (session) {
-        session.sock =
-            sock;
-        session.phone =
-            record.phone;
-        session.days =
-            days;
-        session.pairId =
-            record.pairId;
-    }
-
-    return {
-        success: true,
         sessionId,
-        phone:
-            record.phone,
-        days,
-        expireAt,
+
+        phone,
+
+        jid:
+            options.jid ||
+            null,
+
+        pairId:
+            options.pairingId ||
+            null,
+
         status:
-            "starting"
-    };
+            "starting",
+
+        connected: false,
+
+        mode:
+            options.mode ||
+            "public",
+
+        days,
+
+        expireAt,
+
+        authFolder,
+
+        reconnects:
+            existing?.reconnects ||
+            0,
+
+        messages:
+            existing?.messages ||
+            0,
+
+        commandCount:
+            existing?.commandCount ||
+            0,
+
+        createdAt:
+            existing?.createdAt ||
+            new Date().toISOString(),
+
+        lastSeen:
+            new Date().toISOString(),
+
+        sessionMessageSent:
+            existing?.sessionMessageSent ||
+            false
+    });
+
+    try {
+
+        const sock =
+            await createSocket(
+                sessionId,
+                {
+                    authFolder,
+
+                    phone,
+
+                    jid:
+                        options.jid,
+
+                    pairingId:
+                        options.pairingId,
+
+                    days,
+
+                    expireAt,
+
+                    mode:
+                        options.mode ||
+                        "public"
+                }
+            );
+
+        const session =
+            sessions.get(
+                sessionId
+            );
+
+        /*
+         * Give the socket a short amount of time
+         * to reach connection=open.
+         */
+        const connected =
+            await waitForConnection(
+                sessionId,
+                30000
+            );
+
+        const current =
+            sessions.get(
+                sessionId
+            );
+
+        return {
+
+            success: true,
+
+            sessionId,
+
+            phone:
+                current?.phone ||
+                phone,
+
+            jid:
+                current?.userJid ||
+                options.jid ||
+                null,
+
+            days,
+
+            expireAt,
+
+            status:
+                connected
+                    ? "connected"
+                    : current?.status ||
+                      "starting",
+
+            connected,
+
+            authFolder,
+
+            commandsStarted:
+                true,
+
+            socketCreated:
+                Boolean(sock)
+
+        };
+
+    } catch (error) {
+
+        const current =
+            sessions.get(
+                sessionId
+            );
+
+        if (current) {
+
+            current.status =
+                "error";
+
+            current.connected =
+                false;
+
+            current.sock =
+                null;
+        }
+
+        await saveDeployment({
+
+            sessionId,
+
+            phone,
+
+            jid:
+                options.jid ||
+                null,
+
+            pairId:
+                options.pairingId ||
+                null,
+
+            status:
+                "error",
+
+            connected: false,
+
+            mode:
+                options.mode ||
+                "public",
+
+            days,
+
+            expireAt,
+
+            authFolder,
+
+            reconnects:
+                current?.reconnects ||
+                0,
+
+            messages:
+                current?.messages ||
+                0,
+
+            commandCount:
+                current?.commandCount ||
+                0,
+
+            createdAt:
+                current?.createdAt ||
+                new Date().toISOString(),
+
+            lastSeen:
+                new Date().toISOString()
+        });
+
+        return {
+
+            success: false,
+
+            sessionId,
+
+            error:
+                error.message
+
+        };
+    }
 }
 
-/*
-Alias kept for compatibility with code that calls deploy().
-*/
+/* ============================================================
+   WAIT FOR CONNECTION
+============================================================ */
 
-async function deploy(options = {}) {
+function waitForConnection(
+    sessionId,
+    timeoutMs
+) {
+
+    return new Promise(resolve => {
+
+        const start =
+            Date.now();
+
+        const timer =
+            setInterval(() => {
+
+                const session =
+                    sessions.get(
+                        sessionId
+                    );
+
+                if (
+                    session?.connected
+                ) {
+
+                    clearInterval(timer);
+
+                    resolve(true);
+
+                    return;
+                }
+
+                if (
+                    Date.now() -
+                    start >=
+                    timeoutMs
+                ) {
+
+                    clearInterval(timer);
+
+                    resolve(false);
+                }
+
+            }, 500);
+
+    });
+}
+
+/* ============================================================
+   ALIASES
+============================================================ */
+
+async function deploy(
+    options
+) {
     return deploySession(
         options
     );
 }
 
 /* ============================================================
-   GET SESSION
+   SESSION API
 ============================================================ */
 
-function getSession(sessionId) {
-    return sessions.get(
-        normalizeSessionId(
-            sessionId
-        )
-    ) || null;
-}
-
-function getSessions() {
-    return [
-        ...sessions.values()
-    ].map(
-        session => ({
-            sessionId:
-                session.sessionId,
-            phone:
-                session.phone,
-            pairId:
-                session.pairId,
-            connected:
-                session.connected,
-            mode:
-                session.mode,
-            days:
-                session.days,
-            authFolder:
-                session.authFolder,
-            reconnects:
-                session.reconnects,
-            messages:
-                session.messages,
-            commandCount:
-                session.commandCount,
-            lastSeen:
-                session.lastSeen
-        })
-    );
-}
-
-/* ============================================================
-   STOP SESSION
-============================================================ */
-
-async function stopSession(
+function getSession(
     sessionId
 ) {
+
     const id =
         normalizeSessionId(
             sessionId
@@ -2098,154 +2335,242 @@ async function stopSession(
         sessions.get(id);
 
     if (!session) {
+        return null;
+    }
+
+    return {
+
+        sessionId:
+            session.sessionId,
+
+        phone:
+            session.phone,
+
+        jid:
+            session.userJid,
+
+        pairId:
+            session.pairId,
+
+        status:
+            session.status,
+
+        connected:
+            session.connected,
+
+        mode:
+            session.mode,
+
+        days:
+            session.days,
+
+        expireAt:
+            session.expireAt,
+
+        authFolder:
+            session.authFolder,
+
+        reconnects:
+            session.reconnects,
+
+        messages:
+            session.messages,
+
+        commandCount:
+            session.commandCount,
+
+        createdAt:
+            session.createdAt,
+
+        lastSeen:
+            session.lastSeen
+
+    };
+}
+
+function getSessions() {
+
+    return Array.from(
+        sessions.values()
+    ).map(
+        session =>
+            getSession(
+                session.sessionId
+            )
+    );
+}
+
+/* ============================================================
+   STOP
+============================================================ */
+
+async function stopSession(
+    sessionId
+) {
+
+    const id =
+        normalizeSessionId(
+            sessionId
+        );
+
+    clearReconnectTimer(id);
+
+    const session =
+        sessions.get(id);
+
+    if (!session) {
         return false;
     }
 
     try {
+
         if (session.sock) {
+
             session.sock.end(
                 undefined
             );
         }
-    } catch {
-        // Ignore.
-    }
+
+    } catch {}
+
+    session.sock =
+        null;
 
     session.connected =
         false;
 
+    session.status =
+        "stopped";
+
     await saveDeployment({
+
         sessionId: id,
-        connected: false,
+
+        phone:
+            session.phone,
+
+        jid:
+            session.userJid,
+
+        pairId:
+            session.pairId,
+
         status:
             "stopped",
+
+        connected: false,
+
+        mode:
+            session.mode,
+
+        days:
+            session.days,
+
+        expireAt:
+            session.expireAt,
+
+        authFolder:
+            session.authFolder,
+
+        reconnects:
+            session.reconnects,
+
+        messages:
+            session.messages,
+
+        commandCount:
+            session.commandCount,
+
+        createdAt:
+            session.createdAt,
+
         lastSeen:
-            new Date()
+            new Date().toISOString()
     });
-
-    sessions.delete(id);
-
-    addLog(
-        id,
-        "Bot session stopped."
-    );
 
     return true;
 }
 
 /* ============================================================
-   RESTART SESSION
+   RESTART
 ============================================================ */
 
 async function restartSession(
     sessionId
 ) {
+
     const id =
         normalizeSessionId(
             sessionId
         );
 
-    const deployment =
-        await getDeployment(
-            id
-        );
+    const session =
+        sessions.get(id);
 
-    if (!deployment) {
-        throw new Error(
-            "Deployment not found."
-        );
+    const deployment =
+        getDeployment(id);
+
+    if (!session && !deployment) {
+
+        return {
+            success: false,
+            error: "Session not found"
+        };
     }
 
-    await stopSession(id);
+    if (session) {
+        await stopSession(id);
+    }
 
     return deploySession({
+
         sessionId: id,
+
         phone:
-            deployment.phone,
-        pairId:
-            deployment.pairId,
+            session?.phone ||
+            deployment?.phone,
+
         jid:
-            deployment.jid,
+            session?.userJid ||
+            deployment?.jid,
+
+        pairingId:
+            session?.pairId ||
+            deployment?.pairId,
+
         days:
-            deployment.days,
-        mode:
-            deployment.mode,
+            session?.days ||
+            deployment?.days,
+
+        expireAt:
+            session?.expireAt ||
+            deployment?.expireAt,
+
         authFolder:
-            deployment.authFolder
+            session?.authFolder ||
+            deployment?.authFolder
+
     });
 }
 
 /* ============================================================
-   REMOVE SESSION
+   REMOVE
 ============================================================ */
 
 async function removeSession(
-    sessionId,
-    deleteAuth = false
+    sessionId
 ) {
+
     const id =
         normalizeSessionId(
             sessionId
         );
 
-    const deployment =
-        await getDeployment(
-            id
-        );
-
     await stopSession(id);
 
-    const deployments =
-        await readJson(
-            DEPLOYED_FILE,
-            []
-        );
+    sessions.delete(id);
 
-    const filtered =
-        deployments.filter(
-            item =>
-                normalizeSessionId(
-                    item.sessionId
-                ) !== id
-        );
-
-    await writeJson(
-        DEPLOYED_FILE,
-        filtered
-    );
-
-    if (Deployment) {
-        try {
-            await Deployment.deleteOne({
-                sessionId: id
-            });
-        } catch {
-            // Ignore.
-        }
-    }
-
-    if (
-        deleteAuth &&
-        deployment?.authFolder
-    ) {
-        try {
-            await fsp.rm(
-                deployment.authFolder,
-                {
-                    recursive: true,
-                    force: true
-                }
-            );
-        } catch (err) {
-            addLog(
-                id,
-                `Failed to remove auth folder: ${err.message}`,
-                "error"
-            );
-        }
-    }
-
-    deploymentLogs.delete(id);
+    clearReconnectTimer(id);
 
     return true;
 }
@@ -2254,459 +2579,340 @@ async function removeSession(
    STATS
 ============================================================ */
 
-async function getStats() {
-    const deployments =
-        await readJson(
-            DEPLOYED_FILE,
-            []
-        );
+function stats() {
 
-    let connected = 0;
-
-    for (
-        const session
-        of sessions.values()
-    ) {
-        if (session.connected) {
-            connected++;
-        }
-    }
+    const list =
+        getSessions();
 
     return {
-        totalDeployments:
-            deployments.length,
 
-        activeSessions:
-            sessions.size,
+        total:
+            list.length,
 
-        connectedSessions:
-            connected,
+        connected:
+            list.filter(
+                item =>
+                    item.connected
+            ).length,
 
-        commandsLoaded:
-            loadedCommands.size,
+        disconnected:
+            list.filter(
+                item =>
+                    !item.connected
+            ).length
 
-        uptime:
-            process.uptime(),
-
-        memory:
-            process.memoryUsage()
     };
 }
 
 /* ============================================================
-   LOAD SAVED DEPLOYMENTS
+   RESTORE SAVED SESSIONS
 ============================================================ */
 
 async function loadSavedDeployments() {
+
     const deployments =
-        await readJson(
-            DEPLOYED_FILE,
-            []
-        );
+        readDeployments();
 
-    if (!Array.isArray(
-        deployments
-    )) {
-        return;
-    }
-
-    addLog(
-        "SYSTEM",
-        `${deployments.length} saved deployment(s) found.`
+    logger.info(
+        `[RESTORE] ${deployments.length} saved deployments`
     );
 
-    for (
-        const deployment
-        of deployments
-    ) {
+    for (const deployment of deployments) {
+
         const sessionId =
             normalizeSessionId(
                 deployment.sessionId
             );
 
-        if (
-            !isValidSessionId(
-                sessionId
-            )
-        ) {
+        if (!isValidSessionId(
+            sessionId
+        )) {
             continue;
         }
 
         /*
-        Do not start expired deployments.
-        */
-
+         * Expired deployments should not
+         * automatically reconnect.
+         */
         if (
             deployment.expireAt &&
             new Date(
                 deployment.expireAt
-            ).getTime() <=
-                Date.now()
+            ) <= new Date()
         ) {
-            logger.warn(
-                `[EXPIRED] ${sessionId}`
+
+            logger.info(
+                `[RESTORE] Skipping expired ${sessionId}`
             );
 
             continue;
         }
 
-        if (
-            !deployment.authFolder &&
-            !findAuthFolder(
-                sessionId
-            )
-        ) {
+        const authFolder =
+            resolveAuthFolder(
+                sessionId,
+                deployment.authFolder
+            );
+
+        if (!authFolder) {
+
             logger.warn(
-                `[SKIP] Auth state missing for ${sessionId}`
+                `[RESTORE] Auth state missing for ${sessionId}`
             );
 
             continue;
         }
 
         try {
+
             await deploySession({
+
                 sessionId,
+
                 phone:
                     deployment.phone,
-                pairId:
-                    deployment.pairId,
+
                 jid:
                     deployment.jid,
+
+                pairingId:
+                    deployment.pairId,
+
                 days:
                     deployment.days,
+
+                expireAt:
+                    deployment.expireAt,
+
+                authFolder,
+
                 mode:
-                    deployment.mode,
-                authFolder:
-                    deployment.authFolder
+                    deployment.mode ||
+                    "public"
+
             });
 
-        } catch (err) {
-            logger.error({
-                sessionId,
-                error:
-                    err.message
-            }, "Failed to restore deployment");
+        } catch (error) {
+
+            logger.error(
+                {
+                    sessionId,
+                    error:
+                        error.message
+                },
+                "[RESTORE] Failed"
+            );
         }
     }
 }
 
 /* ============================================================
-   EXPIRATION CHECKER
+   EXPIRATION
 ============================================================ */
 
 setInterval(
     async () => {
-        try {
-            const deployments =
-                await readJson(
-                    DEPLOYED_FILE,
-                    []
-                );
 
-            for (
-                const deployment
-                of deployments
-            ) {
-                if (
-                    !deployment.expireAt
-                ) {
-                    continue;
-                }
+        const now =
+            Date.now();
 
-                const expired =
-                    new Date(
-                        deployment.expireAt
-                    ).getTime() <=
-                    Date.now();
+        for (const [
+            sessionId,
+            session
+        ] of sessions.entries()) {
 
-                if (!expired) {
-                    continue;
-                }
-
-                const id =
-                    normalizeSessionId(
-                        deployment.sessionId
-                    );
-
-                const session =
-                    sessions.get(id);
-
-                if (session) {
-                    await stopSession(
-                        id
-                    );
-                }
-
-                await saveDeployment({
-                    sessionId: id,
-                    status:
-                        "expired",
-                    connected:
-                        false,
-                    lastSeen:
-                        new Date()
-                });
-
-                addLog(
-                    id,
-                    "Deployment expired."
-                );
+            if (!session.expireAt) {
+                continue;
             }
 
-        } catch (err) {
-            logger.error({
-                error:
-                    err.message
-            }, "Expiration checker error");
+            if (
+                new Date(
+                    session.expireAt
+                ).getTime() <= now
+            ) {
+
+                addLog(
+                    sessionId,
+                    "Session expired"
+                );
+
+                await stopSession(
+                    sessionId
+                );
+            }
         }
+
     },
     60 * 1000
 );
 
 /* ============================================================
-   UTILITY
-============================================================ */
-
-function formatUptime(seconds) {
-    const total =
-        Math.floor(
-            Number(seconds || 0)
-        );
-
-    const days =
-        Math.floor(
-            total / 86400
-        );
-
-    const hours =
-        Math.floor(
-            (total % 86400) /
-                3600
-        );
-
-    const minutes =
-        Math.floor(
-            (total % 3600) /
-                60
-        );
-
-    const secs =
-        total % 60;
-
-    return `${days}d ${hours}h ${minutes}m ${secs}s`;
-}
-
-/* ============================================================
    GLOBAL BOT MANAGER
 ============================================================ */
 
-const botManager = {
+global.ETIAS_BOT_MANAGER = {
+
     deploy,
+
     deploySession,
 
     getSession,
+
     getSessions,
 
     getLogs,
 
+    stopSession,
+
     stop: stopSession,
+
+    restartSession,
+
     restart: restartSession,
+
+    removeSession,
+
     remove: removeSession,
 
-    stats: getStats,
+    stats,
 
     loadCommands,
 
-    isValidSessionId
-};
+    loadSavedDeployments,
 
-global.ETIAS_BOT_MANAGER =
-    botManager;
+    isValidSessionId
+
+};
 
 /* ============================================================
    STARTUP
 ============================================================ */
 
 async function start() {
-    try {
-        await ensureJsonFile(
-            DEPLOYED_FILE,
-            []
-        );
 
-        await ensureJsonFile(
-            MULTI_SESSION_FILE,
-            []
-        );
+    logger.info(
+        "=========================================="
+    );
 
-        loadCommands();
+    logger.info(
+        "ETIAS-MINI-BOT starting..."
+    );
 
-        await connectMongo();
+    logger.info(
+        `Node: ${process.version}`
+    );
 
-        /*
-        Give the HTTP server a chance to initialize before
-        restoring saved WhatsApp sessions.
-        */
+    logger.info(
+        `Port: ${PORT}`
+    );
 
-        if (
-            app &&
-            typeof app.listen ===
-                "function"
-        ) {
-            app.listen(
-                PORT,
-                "0.0.0.0",
-                () => {
-                    logger.info(
-                        `🚀 ETIAS-MINI-BOT running on port ${PORT}`
-                    );
+    logger.info(
+        `Auth directory: ${USERS_AUTH_DIR}`
+    );
 
-                    logger.info(
-                        "📱 WhatsApp pairing is handled by the pairing server."
-                    );
+    await loadCommands();
 
-                    logger.info(
-                        "🔐 main.js will NOT generate WhatsApp pairing codes."
-                    );
-                }
+    await connectMongo();
+
+    /*
+     * Start deployment/API server.
+     * server.js itself does NOT call listen().
+     */
+    app.listen(
+        PORT,
+        "0.0.0.0",
+        () => {
+
+            logger.info(
+                `[SERVER] Running on port ${PORT}`
             );
+
         }
+    );
 
-        /*
-        Restore already deployed authenticated sessions.
-        */
+    /*
+     * Restore previously deployed users.
+     */
+    await loadSavedDeployments();
 
-        await loadSavedDeployments();
+    logger.info(
+        "=========================================="
+    );
 
-    } catch (err) {
-        logger.error({
-            error:
-                err.stack ||
-                err.message
-        }, "Fatal startup error");
+    logger.info(
+        "ETIAS-MINI-BOT ONLINE"
+    );
 
-        process.exit(1);
-    }
+    logger.info(
+        "Multi-user deployment manager active"
+    );
+
+    logger.info(
+        "=========================================="
+    );
 }
 
 /* ============================================================
-   PROCESS HANDLING
+   SHUTDOWN
 ============================================================ */
 
-process.on(
-    "uncaughtException",
-    err => {
-        logger.error({
-            error:
-                err.stack ||
-                err.message
-        }, "Uncaught exception");
+async function shutdown(
+    signal
+) {
+
+    logger.info(
+        `[SHUTDOWN] ${signal}`
+    );
+
+    for (const [
+        sessionId
+    ] of sessions) {
+
+        try {
+
+            await stopSession(
+                sessionId
+            );
+
+        } catch {}
     }
-);
+
+    try {
+
+        await mongoose.disconnect();
+
+    } catch {}
+
+    process.exit(0);
+}
 
 process.on(
-    "unhandledRejection",
-    reason => {
-        logger.error({
-            error:
-                reason?.stack ||
-                reason?.message ||
-                String(reason)
-        }, "Unhandled rejection");
-    }
+    "SIGINT",
+    () => shutdown("SIGINT")
 );
 
 process.on(
     "SIGTERM",
-    async () => {
-        logger.info(
-            "SIGTERM received. Shutting down..."
-        );
-
-        for (
-            const [
-                id,
-                session
-            ] of sessions.entries()
-        ) {
-            try {
-                if (
-                    session.sock
-                ) {
-                    session.sock.end(
-                        undefined
-                    );
-                }
-            } catch {
-                // Ignore.
-            }
-
-            addLog(
-                id,
-                "Bot shutting down."
-            );
-        }
-
-        try {
-            await mongoose.connection.close();
-        } catch {
-            // Ignore.
-        }
-
-        process.exit(0);
-    }
-);
-
-process.on(
-    "SIGINT",
-    async () => {
-        logger.info(
-            "SIGINT received. Shutting down..."
-        );
-
-        for (
-            const session
-            of sessions.values()
-        ) {
-            try {
-                if (
-                    session.sock
-                ) {
-                    session.sock.end(
-                        undefined
-                    );
-                }
-            } catch {
-                // Ignore.
-            }
-        }
-
-        try {
-            await mongoose.connection.close();
-        } catch {
-            // Ignore.
-        }
-
-        process.exit(0);
-    }
+    () => shutdown("SIGTERM")
 );
 
 /* ============================================================
    START
 ============================================================ */
 
-start();
+start().catch(
+    error => {
 
-module.exports = {
-    botManager,
-    deploy,
-    deploySession,
-    getSession,
-    getSessions,
-    getLogs,
-    stopSession,
-    restartSession,
-    removeSession,
-    getStats,
-    isValidSessionId
-};
+        logger.error(
+            {
+                error:
+                    error.stack ||
+                    error.message
+            },
+            "[FATAL] Startup failed"
+        );
+
+        process.exit(1);
+
+    }
+);
