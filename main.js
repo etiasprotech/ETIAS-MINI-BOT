@@ -285,10 +285,10 @@ function isGroupJid(jid){ return String(jid||"").endsWith("@g.us"); }
 async function runBuiltInCommand(session,message,command,args){
     const sock=session.sock; const chat=getMessageChat(message);
     switch(command){
-        case "ping": await sock.sendMessage(chat,{text:"🏓 ETIAS-MINI-BOT is online!"}); return true;
-        case "alive": await sock.sendMessage(chat,{text:`🤖 *ETIAS-MINI-BOT*\n\nStatus: ${session.connected?"ONLINE":"OFFLINE"}\nSession: ${session.sessionId}\nPhone: ${session.phone||"Unknown"}\nExpiry: ${session.expireAt||"No expiry"}`}); return true;
-        case "session": await sock.sendMessage(chat,{text:`*SESSION ID*\n\n\`${session.sessionId}\``}); return true;
-        case "status": await sock.sendMessage(chat,{text:`*ETIAS STATUS*\n\nSession: ${session.sessionId}\nConnected: ${session.connected}\nMessages: ${session.messages}\nCommands: ${session.commandCount}\nReconnects: ${session.reconnects}\nExpiry: ${session.expireAt}`}); return true;
+        case "testping": await sock.sendMessage(chat,{text:"🏓 ETIAS-MINI-BOT is online!"}); return true;
+        case "testalive": await sock.sendMessage(chat,{text:`🤖 *ETIAS-MINI-BOT*\n\nStatus: ${session.connected?"ONLINE":"OFFLINE"}\nSession: ${session.sessionId}\nPhone: ${session.phone||"Unknown"}\nExpiry: ${session.expireAt||"No expiry"}`}); return true;
+        case "testsession": await sock.sendMessage(chat,{text:`*SESSION ID*\n\n\`${session.sessionId}\``}); return true;
+        case "teststatus": await sock.sendMessage(chat,{text:`*ETIAS STATUS*\n\nSession: ${session.sessionId}\nConnected: ${session.connected}\nMessages: ${session.messages}\nCommands: ${session.commandCount}\nReconnects: ${session.reconnects}\nExpiry: ${session.expireAt}`}); return true;
         default: return false;
     }
 }
