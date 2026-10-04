@@ -3,13 +3,15 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 const fs = require('fs');
 const path = require('path');
+require('dotenv').config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const ADMIN_KEY = process.env.ADMIN_KEY || 'etias123';
+const ADMIN_KEY = process.env.ADMIN_KEY; // only from .env
+if(!ADMIN_KEY){ console.warn("[WARN] ADMIN_KEY not set in .env"); }
 const MONGO_URI = process.env.MONGO_URI || '';
 
 const activeBots = new Map();
@@ -23,9 +25,18 @@ const save = (d) => fs.writeFileSync(DEPLOY_FILE, JSON.stringify(d,null,2));
 let deployments = load();
 
 function isBotConnected(id){
-  const b = activeBots.get(id);
-  if(!b) return false;
-  return !!(b.ws?.isOpen || b.user || b.ready);
+  // Check real sessions from main.js if available
+  try{
+    if(global.ETIAS_BOT_MANAGER && global.ETIAS_BOT_MANAGER.getSessions){
+      const all = global.ETIAS_BOT_MANAGER.getSessions();
+      const found = all.find(x=>x.sessionId===id);
+      if(found) return !!found.connected;
+    }
+    // Fallback to activeBots map
+    const b = activeBots.get(id);
+    if(b) return !!(b.ws?.isOpen || b.user || b.ready || b.connected);
+  }catch{}
+  return false;
 }
 
 if(MONGO_URI){
@@ -106,26 +117,47 @@ setInterval(loadUsers,5000);
 });
 
 app.get('/deployments',(req,res)=>{
-  res.json(deployments.map(d=>({...d,liveConnected:isBotConnected(d.sessionId)})));
+  // reload file each time to get latest from main.js
+  deployments = load();
+  res.json(deployments.map(d=>({
+    ...d, 
+    expiry: d.expireAt || d.expiry,
+    liveConnected:isBotConnected(d.sessionId),
+    connected:isBotConnected(d.sessionId)
+  })));
 });
 
 app.post('/deploy',(req,res)=>{
   const {adminKey,sessionId,phone,duration}=req.body;
+  if(!ADMIN_KEY) return res.status(500).json({error:'ADMIN_KEY not set in .env'});
   if(adminKey!==ADMIN_KEY) return res.status(401).json({error:'Invalid Admin Key'});
   const expiry=new Date(Date.now()+(parseInt(duration)||30)*24*60*60*1000);
   const cleanPhone=phone.replace(/[^0-9]/g,'');
+  deployments = load();
   let dep=deployments.find(d=>d.sessionId===sessionId);
-  if(!dep){deployments.push({sessionId,phone:cleanPhone,expiry});}
-  else{dep.phone=cleanPhone;dep.expiry=expiry;}
+  if(!dep){deployments.push({sessionId,phone:cleanPhone,expiry,expireAt:expiry.toISOString()});}
+  else{dep.phone=cleanPhone;dep.expiry=expiry;dep.expireAt=expiry.toISOString();}
   save(deployments);
   res.json({sessionId,phone:cleanPhone,expiry,liveConnected:isBotConnected(sessionId)});
 });
 
 app.post('/update-status',(req,res)=>{
   const {sessionId,connected}=req.body;
-  if(connected) activeBots.set(sessionId,{ready:true,ws:{isOpen:true}});
+  if(connected) activeBots.set(sessionId,{ready:true,ws:{isOpen:true},connected:true});
   else activeBots.delete(sessionId);
   res.json({liveConnected:isBotConnected(sessionId)});
 });
 
-app.listen(PORT,()=>console.log('Running '+PORT));
+// Only listen if this file is run directly (not when required by main.js, main.js already triggers listen via this file)
+if(require.main === module){
+  app.listen(PORT,()=>console.log('Running '+PORT));
+} else {
+  // When required by main.js, still listen but avoid double listen
+  if(!global.__ETIAS_SERVER_STARTED){
+    global.__ETIAS_SERVER_STARTED = true;
+    app.listen(PORT,()=>console.log('Running '+PORT));
+  }
+}
+
+module.exports = app;
+module.exports.app = app;
