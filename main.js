@@ -121,6 +121,7 @@ async function loadCommands(){
             if(!command||typeof command!=="object") continue;
             const name=String(command.name||path.basename(file,".js")).toLowerCase();
             commands.set(name,command);
+            if(command.aliases) command.aliases.forEach(a=>commands.set(String(a).toLowerCase(),command));
         }catch(error){ logger.error({file,error:error.message},"[COMMAND] Failed to load"); }
     }
     logger.info(`[COMMANDS] ${commands.size} commands loaded`);
@@ -151,28 +152,21 @@ async function sendSessionInfo(sock,jid,sessionId){
 async function createSocket(sessionId, options={}){
     const id=normalizeSessionId(sessionId);
     if(!isValidSessionId(id)) throw new Error("Invalid Session ID");
-
-    // === EXPIRY CHECK - NEW ===
     const existingDep = getDeployment(id);
     if(isExpired(existingDep)){
         addLog(id, `Session expired on ${existingDep.expireAt} - not connecting`);
-        // Update status to expired
         await saveDeployment({...existingDep, status:"expired", connected:false, lastSeen:new Date().toISOString()});
         throw new Error(`Session ${id} expired on ${existingDep.expireAt}. Please renew.`);
     }
-
     const existing=sessions.get(id);
     if(existing && existing.sock && existing.connected!==false) return existing.sock;
-
     const authFolder=resolveAuthFolder(id, options.authFolder);
     if(!authFolder) throw new Error(`Authentication folder not found for ${id}`);
     if(!hasAuthCredentials(authFolder)) throw new Error(`creds.json not found for ${id}`);
-
     const {state, saveCreds}=await useMultiFileAuthState(authFolder);
     const deployment=getDeployment(id);
     const userJid=options.jid||deployment?.jid||null;
     const phone=normalizePhone(options.phone||deployment?.phone||phoneFromJid(userJid));
-
     const session={
         sessionId:id, sock:null, userJid, phone,
         pairId:options.pairingId||deployment?.pairingId||null,
@@ -188,7 +182,6 @@ async function createSocket(sessionId, options={}){
         sessionMessageSent:Boolean(deployment?.sessionMessageSent)
     };
     sessions.set(id, session);
-
     const sock=makeWASocket({
         auth:state,
         browser:Browsers.macOS("Chrome"),
@@ -199,9 +192,7 @@ async function createSocket(sessionId, options={}){
         generateHighQualityLinkPreview:false
     });
     session.sock=sock;
-
     sock.ev.on("creds.update", async ()=>{ try{ await saveCreds(); }catch(e){ addLog(id,`Failed to save credentials: ${e.message}`); } });
-
     sock.ev.on("connection.update", async update=>{
         const {connection, lastDisconnect}=update;
         if(connection==="connecting"){ session.status="connecting"; session.connected=false; addLog(id,"Connecting..."); return; }
@@ -243,7 +234,6 @@ async function createSocket(sessionId, options={}){
     sock.ev.on("messages.upsert", async event=>{
         try{
             if(!event?.messages) return;
-            // Check expiry on every message
             const dep=getDeployment(id);
             if(isExpired(dep)){
                 addLog(id, "Expired - stopping bot");
@@ -282,16 +272,7 @@ function getMessageText(message){
 function getMessageChat(message){ return (message?.key?.remoteJid||""); }
 function isGroupJid(jid){ return String(jid||"").endsWith("@g.us"); }
 
-async function runBuiltInCommand(session,message,command,args){
-    const sock=session.sock; const chat=getMessageChat(message);
-    switch(command){
-        case "testping": await sock.sendMessage(chat,{text:"🏓 ETIAS-MINI-BOT is online!"}); return true;
-        case "testalive": await sock.sendMessage(chat,{text:`🤖 *ETIAS-MINI-BOT*\n\nStatus: ${session.connected?"ONLINE":"OFFLINE"}\nSession: ${session.sessionId}\nPhone: ${session.phone||"Unknown"}\nExpiry: ${session.expireAt||"No expiry"}`}); return true;
-        case "testsession": await sock.sendMessage(chat,{text:`*SESSION ID*\n\n\`${session.sessionId}\``}); return true;
-        case "teststatus": await sock.sendMessage(chat,{text:`*ETIAS STATUS*\n\nSession: ${session.sessionId}\nConnected: ${session.connected}\nMessages: ${session.messages}\nCommands: ${session.commandCount}\nReconnects: ${session.reconnects}\nExpiry: ${session.expireAt}`}); return true;
-        default: return false;
-    }
-}
+// REMOVED runBuiltInCommand - now only commands folder
 
 async function processMessage(sessionId, message){
     const id=normalizeSessionId(sessionId);
@@ -299,19 +280,12 @@ async function processMessage(sessionId, message){
     const text=getMessageText(message).trim(); if(!text) return;
     const chat=getMessageChat(message);
     session.messages++; session.lastSeen=new Date().toISOString();
-
-    // Simple prefix check
     const prefix=process.env.PREFIX||".";
     if(!text.startsWith(prefix)) return;
-
     const parts=text.slice(prefix.length).trim().split(/\s+/);
     const cmd=parts[0].toLowerCase(); const args=parts.slice(1);
 
-    if(await runBuiltInCommand(session,message,cmd,args)){
-        session.commandCount++; await saveDeployment({sessionId:id,phone:session.phone,jid:session.userJid,pairId:session.pairId,status:session.status,connected:session.connected,mode:session.mode,days:session.days,expireAt:session.expireAt,authFolder:session.authFolder,reconnects:session.reconnects,messages:session.messages,commandCount:session.commandCount,createdAt:session.createdAt,lastSeen:session.lastSeen,sessionMessageSent:session.sessionMessageSent});
-        return;
-    }
-
+    // ONLY from commands folder
     const command=commands.get(cmd);
     if(!command) return;
     try{
@@ -322,21 +296,17 @@ async function processMessage(sessionId, message){
     }catch(e){ addLog(id,`Command ${cmd} error: ${e.message}`); }
 }
 
-async function handleGroupParticipants(sessionId, event){ /* your existing group logic */ }
+async function handleGroupParticipants(sessionId, event){}
 
 async function deploySession(options){
     const id=normalizeSessionId(options.sessionId);
     if(!isValidSessionId(id)) throw new Error("Invalid Session ID");
-
-    // Check if expired
     const existingDep=getDeployment(id);
     if(existingDep && isExpired(existingDep) &&!options.days){
         throw new Error("Session expired, renew first");
     }
-
     const authFolder=options.authFolder||safeSessionFolder(id);
     if(!fs.existsSync(path.join(authFolder,"creds.json"))) throw new Error("creds.json not found");
-
     const deployment={
         sessionId:id, phone:normalizePhone(options.phone||existingDep?.phone||""),
         jid:options.jid||existingDep?.jid||null, pairId:options.pairingId||existingDep?.pairId||null,
@@ -361,7 +331,6 @@ async function removeSession(sessionId){
         try{ session.sock.end(); }catch{}
     }
     sessions.delete(id);
-    // Keep auth folder for renew, only delete if you want full delete - handled by server.js
     return true;
 }
 
@@ -400,7 +369,6 @@ function getSessions(){
     });
 }
 
-// Auto-check expiry every minute
 setInterval(async ()=>{
     const deps=readDeployments();
     for(const dep of deps){
@@ -417,7 +385,6 @@ setInterval(async ()=>{
     }
 }, 60*1000);
 
-// Startup: Load commands + Restore sessions
 (async ()=>{
     await connectMongo();
     await loadCommands();
@@ -443,6 +410,4 @@ global.ETIAS_BOT_MANAGER={
     loadCommands
 };
 
-// Start server
-const server=app.listen(PORT, ()=> logger.info(`[SERVER] ETIAS-MINI-BOT running on port ${PORT}`));
-module.exports={app, server, deploySession, getSessions};
+module.exports={app, deploySession, getSessions, createSocket, startBot: createSocket, loadCommands, sessions, commands};
